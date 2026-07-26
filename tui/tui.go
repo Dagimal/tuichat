@@ -801,28 +801,24 @@ func (m *model) renderMessage(msg chatMessage) string {
 	case "user":
 		tok := session.EstimateTokens(msg.content)
 		header := lipgloss.NewStyle().Bold(true).Foreground(userColor).Render(fmt.Sprintf("▎ You [%d tok]", tok))
-		r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth()))
-		if err != nil {
-			return header + "\n" + msg.content
+		body := msg.content
+		if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth())); err == nil {
+			if rendered, err := r.Render(msg.content); err == nil {
+				body = rendered
+			}
 		}
-		rendered, err := r.Render(msg.content)
-		if err != nil {
-			return header + "\n" + msg.content
-		}
-		return header + "\n" + rendered
+		return header + "\n" + body
 
 	case "assistant":
 		tok := session.EstimateTokens(msg.content)
 		header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render(fmt.Sprintf("▎ %s [%d tok]", m.activeModel, tok))
-		r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth()))
-		if err != nil {
-			return header + "\n" + msg.content
+		body := msg.content
+		if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth())); err == nil {
+			if rendered, err := r.Render(msg.content); err == nil {
+				body = rendered
+			}
 		}
-		rendered, err := r.Render(msg.content)
-		if err != nil {
-			return header + "\n" + msg.content
-		}
-		return header + "\n" + rendered
+		return header + "\n" + body
 
 	case "system":
 		return lipgloss.NewStyle().Italic(true).Foreground(systemColor).Render(msg.content)
@@ -859,12 +855,13 @@ func (m *model) renderStatusBar() string {
 	ctxTok := m.inputTokens + m.outputTokens
 	tokens := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %din/%dout  ctx %dtok ", m.inputTokens, m.outputTokens, ctxTok))
 	mid := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %d msgs ", len(m.messages)))
-	spaces := w - lipgloss.Width(modelStr) - lipgloss.Width(tokens) - lipgloss.Width(mid)
+	left := mid + tokens
+	spaces := w - lipgloss.Width(left) - lipgloss.Width(modelStr)
 	if spaces < 0 {
 		spaces = 0
 	}
 	bar := lipgloss.NewStyle().Background(statusBg).Width(w).Render(
-		modelStr + strings.Repeat(" ", spaces) + mid + tokens,
+		left + strings.Repeat(" ", spaces) + modelStr,
 	)
 	return bar
 }
