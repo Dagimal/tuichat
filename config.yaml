@@ -1,0 +1,20 @@
+default_model: "gpt-4o"
+
+providers:
+  - name: "openai"
+    api_key: "$OPENAI_API_KEY"
+    base_url: "https://api.openai.com/v1"
+    models:
+      - id: "gpt-4o"
+        name: "GPT-4o"
+      - id: "gpt-4o-mini"
+        name: "GPT-4o Mini"
+
+  - name: "groq"
+    api_key: "$GROQ_API_KEY"
+    base_url: "https://api.groq.com/openai/v1"
+    models:
+      - id: "llama-3.3-70b-versatile"
+        name: "Llama 3.3 70B"
+      - id: "mixtral-8x7b-32768"
+        name: "Mixtral 8x7b"
