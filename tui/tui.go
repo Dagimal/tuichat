@@ -7,6 +7,7 @@ import (
 
 	"tuichat/config"
 	"tuichat/llm"
+	"tuichat/session"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
@@ -22,6 +23,7 @@ type state int
 const (
 	chatState state = iota
 	modelListState
+	sessionListState
 )
 
 type chatMessage struct {
@@ -46,37 +48,68 @@ func (i modelItem) FilterValue() string {
 	return i.model.Name + " " + i.model.ID + " " + i.provider.Name
 }
 
+type sessionItem struct {
+	sess *session.Session
+}
+
+func (i sessionItem) Title() string       { return i.sess.Name }
+func (i sessionItem) Description() string { return fmt.Sprintf("%s • %d msgs", i.sess.CreatedAt.Format("2006-01-02 15:04"), len(i.sess.Messages)) }
+func (i sessionItem) FilterValue() string { return i.sess.Name + " " + i.sess.CreatedAt.Format("2006-01-02") }
+
 type model struct {
-	state          state
-	cfg            *config.Config
-	messages       []chatMessage
-	input          textinput.Model
-	vp             viewport.Model
-	mdList         list.Model
-	activeModel    string
-	activeProvider *config.Provider
-	loading        bool
-	currentResp    string
-	sub            chan tea.Msg
-	ready          bool
-	width          int
-	spinner        spinner.Model
-	cancel         context.CancelFunc
-	history        []string
-	historyIdx     int
-	savedInput     string
+	state           state
+	cfg             *config.Config
+	messages        []chatMessage
+	input           textinput.Model
+	vp              viewport.Model
+	mdList          list.Model
+	activeModel     string
+	activeProvider  *config.Provider
+	loading         bool
+	currentResp     string
+	sub             chan tea.Msg
+	ready           bool
+	width           int
+	height          int
+	spinner         spinner.Model
+	cancel          context.CancelFunc
+	history         []string
+	historyIdx      int
+	savedInput      string
+	currentSession  *session.Session
+	sessions        []*session.Session
+	suggestions     []string
+	suggestionIdx   int
+	showSuggestions bool
+	inputTokens     int
+	outputTokens    int
 }
 
 var (
-	userColor      = lipgloss.Color("#7D56F4")
-	assistantColor = lipgloss.Color("#00D68F")
-	systemColor    = lipgloss.Color("#6B6B6B")
-	statusBg       = lipgloss.Color("#2A2A2A")
+	userColor       = lipgloss.Color("#7D56F4")
+	assistantColor  = lipgloss.Color("#00D68F")
+	systemColor     = lipgloss.Color("#6B6B6B")
+	statusBg        = lipgloss.Color("#2A2A2A")
+	suggestBg       = lipgloss.Color("#1E1E2E")
+	suggestSelBg    = lipgloss.Color("#313244")
+	suggestText     = lipgloss.Color("#CDD6F4")
+	suggestDesc     = lipgloss.Color("#6C7086")
 )
+
+var commands = []struct {
+	cmd  string
+	desc string
+}{
+	{"/model", "Switch model"},
+	{"/sessions", "Manage sessions"},
+	{"/reset", "Clear history"},
+	{"/new", "New session"},
+	{"/exit", "Quit"},
+}
 
 func New(cfg *config.Config) *model {
 	ti := textinput.New()
-	ti.Placeholder = "Type a message... (/model, /reset, /exit)"
+	ti.Placeholder = "Type a message... (/model, /new, /sessions, /reset, /exit)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.SetWidth(80)
@@ -105,14 +138,15 @@ func New(cfg *config.Config) *model {
 	}
 
 	delegate := list.NewDefaultDelegate()
-	items := buildListItems(cfg)
+	items := buildModelItems(cfg)
 	l := list.New(items, delegate, 0, 0)
 	l.Title = "Select Model"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
 	l.DisableQuitKeybindings()
 
-	return &model{
+	// Try to resume last session
+	m := &model{
 		cfg:            cfg,
 		input:          ti,
 		mdList:         l,
@@ -121,14 +155,42 @@ func New(cfg *config.Config) *model {
 		sub:            make(chan tea.Msg, 128),
 		spinner:        s,
 	}
+	m.currentSession = session.New(activeModel)
+	return m
 }
 
-func buildListItems(cfg *config.Config) []list.Item {
+func toChatMessages(s *session.Session) []chatMessage {
+	var msgs []chatMessage
+	for _, m := range s.Messages {
+		msgs = append(msgs, chatMessage{role: m.Role, content: m.Content})
+	}
+	return msgs
+}
+
+func countTokens(msgs []session.Message, role string) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Role == role {
+			n += m.Tokens
+		}
+	}
+	return n
+}
+
+func buildModelItems(cfg *config.Config) []list.Item {
 	var items []list.Item
 	for i := range cfg.Providers {
 		for _, m := range cfg.Providers[i].Models {
 			items = append(items, modelItem{provider: &cfg.Providers[i], model: m})
 		}
+	}
+	return items
+}
+
+func buildSessionItems(sessions []*session.Session) []list.Item {
+	var items []list.Item
+	for _, s := range sessions {
+		items = append(items, sessionItem{sess: s})
 	}
 	return items
 }
@@ -141,22 +203,33 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		m.vp = viewport.New(
 			viewport.WithWidth(msg.Width),
-			viewport.WithHeight(msg.Height-4),
+			viewport.WithHeight(msg.Height-4-m.suggestLines()),
 		)
 		m.vp.YPosition = 0
+		m.vp.MouseWheelEnabled = true
 		m.input.SetWidth(msg.Width - 4)
 		m.mdList.SetWidth(msg.Width)
 		m.mdList.SetHeight(msg.Height - 4)
 		m.ready = true
+		m.syncViewport()
 		return m, nil
 
 	case tea.KeyPressMsg:
-		if m.state == modelListState {
+		switch m.state {
+		case modelListState:
 			return m.handleModelListKey(msg)
+		case sessionListState:
+			return m.handleSessionListKey(msg)
 		}
 		return m.handleChatKey(msg)
+
+	case tea.MouseMsg:
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
 
 	case streamProgressMsg:
 		m.currentResp += string(msg)
@@ -166,6 +239,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamDoneMsg:
 		m.messages = append(m.messages, chatMessage{role: "assistant", content: m.currentResp})
+		m.outputTokens += session.EstimateTokens(m.currentResp)
+		m.currentSession.AddMessage("assistant", m.currentResp)
+		m.currentSession.Model = m.activeModel
+		if m.currentSession.Name == "Untitled" {
+			m.currentSession.Name = m.currentSession.GenerateName()
+		}
+		m.currentSession.Save()
 		m.currentResp = ""
 		m.loading = false
 		m.syncViewport()
@@ -195,12 +275,35 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) suggestLines() int {
+	if !m.showSuggestions || len(m.suggestions) == 0 {
+		return 0
+	}
+	n := len(m.suggestions)
+	if n > 4 {
+		n = 4
+	}
+	return n
+}
+
 func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.Keystroke() {
 	case "ctrl+c":
+		if len(m.messages) > 0 {
+			m.currentSession.Save()
+		}
 		return m, tea.Quit
 
 	case "enter":
+		if m.showSuggestions && len(m.suggestions) > 0 {
+			sel := m.suggestions[m.suggestionIdx]
+			m.input.SetValue(sel + " ")
+			m.input.CursorEnd()
+			m.showSuggestions = false
+			m.suggestions = nil
+			m.vp.SetHeight(m.height - 4)
+			return m, nil
+		}
 		if m.loading {
 			return m, nil
 		}
@@ -218,6 +321,8 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		input = strings.TrimSpace(input)
 
 		if strings.HasPrefix(input, "/") {
+			m.showSuggestions = false
+			m.suggestions = nil
 			return m.handleCommand(input)
 		}
 		if input == "" {
@@ -229,19 +334,57 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.savedInput = ""
 
 		m.messages = append(m.messages, chatMessage{role: "user", content: input})
+		m.inputTokens += session.EstimateTokens(input)
+		m.currentSession.AddMessage("user", input)
+		m.currentSession.Save()
 		m.loading = true
 		m.currentResp = ""
 		m.syncViewport()
 		m.vp.GotoBottom()
 		return m, m.startStream(input)
 
+	case "tab":
+		if m.showSuggestions && len(m.suggestions) > 0 {
+			sel := m.suggestions[m.suggestionIdx]
+			m.input.SetValue(sel + " ")
+			m.input.CursorEnd()
+			m.showSuggestions = false
+			m.suggestions = nil
+			if m.height > 0 {
+				m.vp.SetHeight(m.height - 4)
+			}
+			return m, nil
+		}
+		return m, nil
+
+	case "esc":
+		if m.showSuggestions {
+			m.showSuggestions = false
+			m.suggestions = nil
+			if m.height > 0 {
+				m.vp.SetHeight(m.height - 4)
+			}
+			return m, nil
+		}
+		return m, nil
+
 	case "up":
-		if len(m.history) > 0 {
+		if m.showSuggestions {
+			if m.suggestionIdx > 0 {
+				m.suggestionIdx--
+			}
+			return m, nil
+		}
+		if m.historyIdx != -1 || len(m.history) > 0 {
 			if m.historyIdx == -1 {
 				m.historyIdx = len(m.history) - 1
 				m.savedInput = m.input.Value()
 			} else if m.historyIdx > 0 {
 				m.historyIdx--
+			} else {
+				var vpCmd tea.Cmd
+				m.vp, vpCmd = m.vp.Update(msg)
+				return m, vpCmd
 			}
 			m.input.SetValue(m.history[m.historyIdx])
 			m.input.CursorEnd()
@@ -252,6 +395,12 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, vpCmd
 
 	case "down":
+		if m.showSuggestions {
+			if m.suggestionIdx < len(m.suggestions)-1 {
+				m.suggestionIdx++
+			}
+			return m, nil
+		}
 		if m.historyIdx != -1 {
 			if m.historyIdx < len(m.history)-1 {
 				m.historyIdx++
@@ -270,7 +419,39 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.updateSuggestions()
 	return m, cmd
+}
+
+func (m *model) updateSuggestions() {
+	val := m.input.Value()
+	if !strings.HasPrefix(val, "/") {
+		m.showSuggestions = false
+		m.suggestions = nil
+		return
+	}
+	var filtered []string
+	for _, c := range commands {
+		if strings.HasPrefix(c.cmd, val) {
+			filtered = append(filtered, c.cmd)
+		}
+	}
+	if len(filtered) == 0 {
+		m.showSuggestions = false
+		m.suggestions = nil
+		if m.height > 0 {
+			m.vp.SetHeight(m.height - 4)
+		}
+		return
+	}
+	m.suggestions = filtered
+	if m.suggestionIdx >= len(m.suggestions) {
+		m.suggestionIdx = len(m.suggestions) - 1
+	}
+	m.showSuggestions = true
+	if m.height > 0 {
+		m.vp.SetHeight(m.height - 4 - m.suggestLines())
+	}
 }
 
 func (m *model) handleModelListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -296,32 +477,141 @@ func (m *model) handleModelListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *model) handleSessionListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.Keystroke() {
+	case "enter":
+		selected, ok := m.mdList.SelectedItem().(sessionItem)
+		if ok {
+			m.loadSession(selected.sess)
+		}
+		m.state = chatState
+		m.input.Focus()
+		return m, nil
+
+	case "esc":
+		m.state = chatState
+		m.input.Focus()
+		return m, nil
+
+	case "r":
+		selected, ok := m.mdList.SelectedItem().(sessionItem)
+		if ok {
+			m.input.SetValue(selected.sess.Name)
+			m.input.Focus()
+			m.state = chatState
+			return m, nil
+		}
+		return m, nil
+
+	case "d", "ctrl+d":
+		selected, ok := m.mdList.SelectedItem().(sessionItem)
+		if ok {
+			selected.sess.Delete()
+			m.refreshSessionList()
+		}
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.mdList, cmd = m.mdList.Update(msg)
+	return m, cmd
+}
+
+func (m *model) loadSession(s *session.Session) {
+	m.currentSession = s
+	m.messages = toChatMessages(s)
+	m.inputTokens = countTokens(s.Messages, "user")
+	m.outputTokens = countTokens(s.Messages, "assistant")
+	m.activeModel = s.Model
+	m.loading = false
+	m.currentResp = ""
+	m.syncViewport()
+	m.vp.GotoBottom()
+}
+
+func (m *model) refreshSessionList() {
+	sessions, _ := session.List()
+	m.mdList.SetItems(buildSessionItems(sessions))
+}
+
 func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
-	switch input {
-	case "/exit":
+	switch {
+	case input == "/exit":
+		if len(m.messages) > 0 {
+			m.currentSession.Save()
+		}
 		return m, tea.Quit
 
-	case "/reset":
+	case input == "/reset":
 		if m.cancel != nil {
 			m.cancel()
 		}
 		m.messages = nil
 		m.currentResp = ""
 		m.loading = false
+		m.inputTokens = 0
+		m.outputTokens = 0
+		m.currentSession = session.New(m.activeModel)
 		m.syncViewport()
 		return m, nil
 
-	case "/model", "/switch":
+	case input == "/model" || input == "/switch":
 		m.state = modelListState
-		m.mdList.SetItems(buildListItems(m.cfg))
+		m.mdList.SetItems(buildModelItems(m.cfg))
 		m.mdList.ResetSelected()
 		m.input.Blur()
+		return m, nil
+
+	case input == "/sessions":
+		sessions, err := session.List()
+		if err != nil || len(sessions) == 0 {
+			m.messages = append(m.messages, chatMessage{
+				role:    "system",
+				content: "No saved sessions.",
+			})
+			m.syncViewport()
+			return m, nil
+		}
+		m.state = sessionListState
+		m.mdList.SetItems(buildSessionItems(sessions))
+		m.mdList.ResetSelected()
+		m.mdList.Title = "Sessions (r=rename d=delete)"
+		m.input.Blur()
+		return m, nil
+
+	case strings.HasPrefix(input, "/new "):
+		name := strings.TrimSpace(strings.TrimPrefix(input, "/new "))
+		if name == "" {
+			m.messages = append(m.messages, chatMessage{
+				role: "system", content: "Usage: /new <session name>",
+			})
+			m.syncViewport()
+			return m, nil
+		}
+		if len(m.messages) > 0 {
+			m.currentSession.Save()
+		}
+		m.messages = nil
+		m.currentResp = ""
+		m.loading = false
+		m.inputTokens = 0
+		m.outputTokens = 0
+		m.currentSession = session.New(m.activeModel)
+		m.currentSession.Name = name
+		m.syncViewport()
+		return m, nil
+
+	case strings.HasPrefix(input, "/rename "):
+		name := strings.TrimPrefix(input, "/rename ")
+		if m.currentSession != nil && strings.TrimSpace(name) != "" {
+			m.currentSession.Rename(strings.TrimSpace(name))
+		}
 		return m, nil
 
 	default:
 		m.messages = append(m.messages, chatMessage{
 			role:    "system",
-			content: fmt.Sprintf("Unknown: %s\nAvailable: /model, /reset, /exit", input),
+			content: fmt.Sprintf("Unknown: %s\nAvailable: /model, /new, /sessions, /reset, /exit", input),
 		})
 		m.syncViewport()
 		return m, nil
@@ -408,15 +698,29 @@ func (m *model) syncViewport() {
 	m.vp.SetContent(b.String())
 }
 
+func (m *model) glamourWidth() int {
+	w := m.width - 4
+	if w < 40 {
+		w = 40
+	}
+	return w
+}
+
 func (m *model) renderMessage(msg chatMessage) string {
 	switch msg.role {
 	case "user":
-		header := lipgloss.NewStyle().Bold(true).Foreground(userColor).Render("▎ You")
+		tok := session.EstimateTokens(msg.content)
+		header := lipgloss.NewStyle().Bold(true).Foreground(userColor).Render(fmt.Sprintf("▎ You [%d tok]", tok))
 		return header + "\n" + msg.content
 
 	case "assistant":
-		header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render("▎ " + m.activeModel)
-		rendered, err := glamour.Render(msg.content, "dark")
+		tok := session.EstimateTokens(msg.content)
+		header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render(fmt.Sprintf("▎ %s [%d tok]", m.activeModel, tok))
+		r, err := glamour.NewTermRenderer(glamour.WithWordWrap(m.glamourWidth()))
+		if err != nil {
+			return header + "\n" + msg.content
+		}
+		rendered, err := r.Render(msg.content)
 		if err != nil {
 			return header + "\n" + msg.content
 		}
@@ -432,7 +736,11 @@ func (m *model) renderMessage(msg chatMessage) string {
 
 func (m *model) renderStreaming() string {
 	header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render("▎ " + m.activeModel)
-	rendered, err := glamour.Render(m.currentResp, "dark")
+	r, err := glamour.NewTermRenderer(glamour.WithWordWrap(m.glamourWidth()))
+	if err != nil {
+		return header + "\n" + m.currentResp + "\n" + m.spinner.View()
+	}
+	rendered, err := r.Render(m.currentResp)
 	if err != nil {
 		return header + "\n" + m.currentResp + "\n" + m.spinner.View()
 	}
@@ -449,33 +757,76 @@ func (m *model) renderStatusBar() string {
 	if w == 0 {
 		w = 80
 	}
-	left := lipgloss.NewStyle().Foreground(assistantColor).Render(" " + m.activeModel + " ")
-	count := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %d msgs ", len(m.messages)))
-	spaces := w - lipgloss.Width(left) - lipgloss.Width(count)
+	modelStr := lipgloss.NewStyle().Foreground(assistantColor).Render(" " + m.activeModel + " ")
+	totalTok := m.inputTokens + m.outputTokens
+	tokens := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %din/%dout/%dtotal ", m.inputTokens, m.outputTokens, totalTok))
+	mid := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %d msgs ", len(m.messages)))
+	spaces := w - lipgloss.Width(modelStr) - lipgloss.Width(tokens) - lipgloss.Width(mid)
 	if spaces < 0 {
 		spaces = 0
 	}
 	bar := lipgloss.NewStyle().Background(statusBg).Width(w).Render(
-		left + strings.Repeat(" ", spaces) + count,
+		modelStr + strings.Repeat(" ", spaces) + mid + tokens,
 	)
 	return bar
+}
+
+func (m *model) renderSuggestionsOverlay() string {
+	if !m.showSuggestions || len(m.suggestions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	maxN := len(m.suggestions)
+	if maxN > 4 {
+		maxN = 4
+	}
+	for i := 0; i < maxN; i++ {
+		cmd := m.suggestions[i]
+		var desc string
+		for _, c := range commands {
+			if c.cmd == cmd {
+				desc = c.desc
+				break
+			}
+		}
+		if i == m.suggestionIdx {
+			b.WriteString(lipgloss.NewStyle().
+				Background(suggestSelBg).
+				Foreground(suggestText).
+				Render(fmt.Sprintf("  %s  %s", cmd, desc)))
+		} else {
+			b.WriteString(lipgloss.NewStyle().
+				Background(suggestBg).
+				Foreground(suggestDesc).
+				Render(fmt.Sprintf("  %s  %s", cmd, desc)))
+		}
+		if i < maxN-1 {
+			b.WriteString("\n")
+		}
+	}
+	return b.String() + "\n"
 }
 
 func (m *model) View() tea.View {
 	if !m.ready {
 		v := tea.NewView("\n  Loading...")
 		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
 		return v
 	}
 
-	if m.state == modelListState {
+	if m.state == modelListState || m.state == sessionListState {
 		s := lipgloss.NewStyle().Padding(1, 2)
 		v := tea.NewView(s.Render(m.mdList.View()))
 		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
 		return v
 	}
 
-	v := tea.NewView(fmt.Sprintf("%s\n%s\n%s", m.vp.View(), m.renderStatusBar(), m.input.View()))
+	suggest := m.renderSuggestionsOverlay()
+	content := fmt.Sprintf("%s\n%s\n%s%s", m.vp.View(), m.renderStatusBar(), suggest, m.input.View())
+	v := tea.NewView(content)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }

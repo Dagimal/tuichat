@@ -46,12 +46,32 @@ API keys prefixed with `$` are read from environment variables.
 |--------|--------------|
 | Send message | `Enter` |
 | Switch model | `/model` or `/switch` |
+| Manage sessions | `/sessions` (r=rename, d=delete) |
 | Clear history | `/reset` |
+| Rename session | `/rename <name>` |
 | Quit | `/exit` or `Ctrl+C` |
 | Scroll up | `↑` / `PgUp` / mouse wheel |
 | Scroll down | `↓` / `PgDn` / mouse wheel |
-| Previous message | `↑` (in empty input) |
-| Next message | `↓` (in empty input) |
+| Previous message | `↑` |
+| Next message | `↓` |
+| Command completion | `/` + `Tab` or `↑`/`↓` |
+
+> **Copy text:** hold `Shift` + click-drag to select. This is standard terminal
+> behavior when mouse tracking is active (required for wheel scrolling).
+
+## Sessions
+
+Sessions are auto-saved to `~/.config/tuichat/sessions/` after each response.
+On restart, the last session resumes automatically.
+
+- Session name defaults to the first message snippet
+- Rename with `/rename <name>` or press `r` in the sessions list
+- Delete by pressing `d` in the sessions list
+
+## Token Counter
+
+Each message shows estimated token count in the header. The status bar shows
+total input/output tokens for the current session.
 
 ## Requirements
 
