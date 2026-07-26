@@ -235,6 +235,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp, cmd = m.vp.Update(msg)
 		return m, cmd
 
+	case tea.PasteMsg:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+
 	case streamProgressMsg:
 		m.currentResp += string(msg)
 		m.updateViewportContent()
@@ -796,12 +801,20 @@ func (m *model) renderMessage(msg chatMessage) string {
 	case "user":
 		tok := session.EstimateTokens(msg.content)
 		header := lipgloss.NewStyle().Bold(true).Foreground(userColor).Render(fmt.Sprintf("▎ You [%d tok]", tok))
-		return header + "\n" + msg.content
+		r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth()))
+		if err != nil {
+			return header + "\n" + msg.content
+		}
+		rendered, err := r.Render(msg.content)
+		if err != nil {
+			return header + "\n" + msg.content
+		}
+		return header + "\n" + rendered
 
 	case "assistant":
 		tok := session.EstimateTokens(msg.content)
 		header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render(fmt.Sprintf("▎ %s [%d tok]", m.activeModel, tok))
-		r, err := glamour.NewTermRenderer(glamour.WithWordWrap(m.glamourWidth()))
+		r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth()))
 		if err != nil {
 			return header + "\n" + msg.content
 		}
@@ -821,7 +834,7 @@ func (m *model) renderMessage(msg chatMessage) string {
 
 func (m *model) renderStreaming() string {
 	header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render("▎ " + m.activeModel)
-	r, err := glamour.NewTermRenderer(glamour.WithWordWrap(m.glamourWidth()))
+	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth()))
 	if err != nil {
 		return header + "\n" + m.currentResp + "\n" + m.spinner.View()
 	}
