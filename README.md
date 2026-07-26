@@ -46,15 +46,18 @@ API keys prefixed with `$` are read from environment variables.
 |--------|--------------|
 | Send message | `Enter` |
 | Switch model | `/model` or `/switch` |
-| Manage sessions | `/sessions` (r=rename, d=delete) |
+| Manage sessions | `/sessions` |
 | Clear history | `/reset` |
-| Rename session | `/rename <name>` |
+| New session | `/new <name>` |
+| Rename session | `/rename <name>` or `Ctrl+R` in session list |
+| Delete session | `Ctrl+D` in session list |
+| Filter sessions | type directly in session list |
 | Quit | `/exit` or `Ctrl+C` |
 | Scroll up | `↑` / `PgUp` / mouse wheel |
 | Scroll down | `↓` / `PgDn` / mouse wheel |
 | Previous message | `↑` |
 | Next message | `↓` |
-| Command completion | `/` + `Tab` or `↑`/`↓` |
+| Command completion | `/` + `↑`/`↓` + `Enter`
 
 > **Copy text:** hold `Shift` + click-drag to select. This is standard terminal
 > behavior when mouse tracking is active (required for wheel scrolling).
@@ -62,18 +65,32 @@ API keys prefixed with `$` are read from environment variables.
 ## Sessions
 
 Sessions are auto-saved to `~/.config/tuichat/sessions/` after each response.
-On restart, the last session resumes automatically.
+Start fresh every time you open the app (no auto-resume). Saved sessions
+are browsable via `/sessions`.
 
 - Session name defaults to the first message snippet
-- Rename with `/rename <name>` or press `r` in the sessions list
-- Delete by pressing `d` in the sessions list
+- `/new <name>` — start a new session with a custom name
+- `/rename <name>` or `Ctrl+R` in session list — rename current/selected session
+- `Ctrl+D` in session list — delete a session
+- **Filter sessions** — type any text directly in the session list to search by name
+- Rename inline — `Ctrl+R` opens a rename bar below the list
 
 ## Token Counter
 
-Each message shows estimated token count in the header. The status bar shows
-total input/output tokens for the current session.
+Each message header shows estimated tokens `[N tok]`. The status bar shows
+input/output token counts and total context tokens (`ctx`) sent per request.
 
 ## Requirements
 
 - Go 1.25+
 - API key for at least one provider
+
+## Features
+
+- **Real-time Markdown** — streaming response rendered with Glamour, adjusts to terminal width
+- **Multi-provider** — OpenAI-compatible APIs, switch models mid-session
+- **Session management** — auto-save, browse, rename, delete, filter
+- **Command auto-complete** — type `/` to see available commands
+- **Token counter** — per-message and session totals, including context window
+- **Mouse support** — scroll wheel, `Shift`+drag to copy text
+- **Rendered message cache** — glamour output cached per message, no re-render on stream updates
