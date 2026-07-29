@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 
 	"tuichat/config"
@@ -34,6 +36,7 @@ type chatMessage struct {
 
 type streamProgressMsg string
 type streamDoneMsg struct{}
+type editorResultMsg struct{ content string }
 type errMsg struct{ err error }
 
 func (e errMsg) Error() string { return e.err.Error() }
@@ -90,6 +93,8 @@ type model struct {
 	ctxTokens       int
 	ctxMgr          *ctxmgr.Manager
 	autoScroll      bool
+	pastedContent   string
+	pastedLines     int
 }
 
 var cavemanPrompts = map[string]string{
@@ -107,6 +112,8 @@ var (
 	suggestSelBg    = lipgloss.Color("#313244")
 	suggestText     = lipgloss.Color("#CDD6F4")
 	suggestDesc     = lipgloss.Color("#6C7086")
+	pasteBg         = lipgloss.Color("#1E3A3A")
+	pasteFg         = lipgloss.Color("#7EDDD3")
 )
 
 var commands = []struct {
@@ -118,6 +125,7 @@ var commands = []struct {
 	{"/reset", "Clear history"},
 	{"/compact", "Summarize old messages to save tokens"},
 	{"/caveman", "Toggle compact mode: off/lite/full/ultra"},
+	{"/edit", "Open editor (ctrl+e)"},
 	{"/new", "New session"},
 	{"/rename", "Rename session"},
 	{"/exit", "Quit"},
@@ -125,7 +133,7 @@ var commands = []struct {
 
 func New(cfg *config.Config) *model {
 	ti := textinput.New()
-	ti.Placeholder = "Type a message... (/model, /new, /sessions, /reset, /exit)"
+	ti.Placeholder = "Type a message... (/model, /new, /edit, /sessions, /reset, /exit)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.SetWidth(80)
@@ -255,6 +263,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.PasteMsg:
+		pasted := msg.Content
+		lines := strings.Split(pasted, "\n")
+		n := len(lines)
+		if n > 1 && lines[n-1] == "" {
+			n--
+		}
+		if n > 1 {
+			m.pastedContent = pasted
+			m.pastedLines = n
+			m.input.SetValue("")
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
@@ -282,6 +302,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewportContent()
 		if m.autoScroll {
 			m.vp.GotoBottom()
+		}
+		return m, nil
+
+	case editorResultMsg:
+		content := strings.TrimSpace(msg.content)
+		if content != "" {
+			if strings.Count(content, "\n") > 0 {
+				m.pastedContent = content
+				m.pastedLines = strings.Count(content, "\n") + 1
+				if strings.HasSuffix(content, "\n") {
+					m.pastedLines--
+				}
+				m.input.SetValue("")
+			} else {
+				m.pastedContent = ""
+				m.pastedLines = 0
+				m.input.SetValue(content)
+				m.input.CursorEnd()
+			}
 		}
 		return m, nil
 
@@ -321,7 +360,21 @@ func (m *model) suggestLines() int {
 }
 
 func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// Clear paste on any input-modifying key (except Enter/ctrl+e/navigation)
+	if m.pastedContent != "" {
+		switch msg.Keystroke() {
+		case "enter", "ctrl+e", "up", "down", "ctrl+c":
+			// preserve paste
+		default:
+			m.pastedContent = ""
+			m.pastedLines = 0
+		}
+	}
+
 	switch msg.Keystroke() {
+	case "ctrl+e":
+		return m, m.openEditor()
+
 	case "ctrl+c":
 		if len(m.messages) > 0 {
 			m.currentSession.Save()
@@ -352,6 +405,11 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 		input := m.input.Value()
+		if m.pastedContent != "" {
+			input = m.pastedContent
+			m.pastedContent = ""
+			m.pastedLines = 0
+		}
 		m.input.SetValue("")
 		input = strings.TrimSpace(input)
 
@@ -657,6 +715,8 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.inputTokens = 0
 		m.outputTokens = 0
 		m.ctxTokens = 0
+		m.pastedContent = ""
+		m.pastedLines = 0
 		m.currentSession = session.New(m.activeModel)
 		m.updateViewportContent()
 		return m, nil
@@ -759,6 +819,9 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.updateViewportContent()
 		return m, nil
 
+	case input == "/edit":
+		return m, m.openEditor()
+
 	case strings.HasPrefix(input, "/rename "):
 		name := strings.TrimPrefix(input, "/rename ")
 		if m.currentSession != nil && strings.TrimSpace(name) != "" {
@@ -775,6 +838,41 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.updateViewportContent()
 		return m, nil
 	}
+}
+
+func (m *model) openEditor() tea.Cmd {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+
+	f, err := os.CreateTemp("", "tuichat-*.md")
+	if err != nil {
+		return func() tea.Msg { return errMsg{err} }
+	}
+	content := m.input.Value()
+	if m.pastedContent != "" {
+		content = m.pastedContent
+	}
+	f.WriteString(content)
+	tmpPath := f.Name()
+	f.Close()
+
+	c := exec.Command(editor, tmpPath)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(tmpPath)
+		if err != nil {
+			return errMsg{err}
+		}
+		data, rerr := os.ReadFile(tmpPath)
+		if rerr != nil {
+			return errMsg{rerr}
+		}
+		return editorResultMsg{content: string(data)}
+	})
 }
 
 func (m *model) startStream(input string) tea.Cmd {
@@ -947,6 +1045,18 @@ func (m *model) renderLoading() string {
 	return header + "\n" + m.spinner.View() + " Thinking..."
 }
 
+func (m *model) renderPasteIndicator() string {
+	if m.pastedContent == "" {
+		return ""
+	}
+	label := fmt.Sprintf(" 📋 pasted %d lines  (Enter to send, ctrl+e to edit) ", m.pastedLines)
+	return lipgloss.NewStyle().
+		Background(pasteBg).
+		Foreground(pasteFg).
+		Padding(0, 1).
+		Render(label) + "\n"
+}
+
 func (m *model) renderStatusBar() string {
 	w := m.width
 	if w == 0 {
@@ -1057,7 +1167,8 @@ func (m *model) View() tea.View {
 	}
 
 	suggest := m.renderSuggestionsOverlay()
-	content := fmt.Sprintf("%s\n%s\n%s%s", m.vp.View(), m.renderStatusBar(), suggest, m.input.View())
+	pasteInd := m.renderPasteIndicator()
+	content := fmt.Sprintf("%s\n%s\n%s%s%s", m.vp.View(), m.renderStatusBar(), pasteInd, suggest, m.input.View())
 	v := tea.NewView(content)
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
