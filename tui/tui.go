@@ -87,6 +87,7 @@ type model struct {
 	showSuggestions bool
 	inputTokens     int
 	outputTokens    int
+	ctxTokens       int
 	ctxMgr          *ctxmgr.Manager
 	autoScroll      bool
 }
@@ -622,6 +623,7 @@ func (m *model) loadSession(s *session.Session) {
 	m.invalidateCache()
 	m.inputTokens = countTokens(s.Messages, "user")
 	m.outputTokens = countTokens(s.Messages, "assistant")
+	m.ctxTokens = 0
 	m.activeModel = s.Model
 	m.loading = false
 	m.currentResp = ""
@@ -654,6 +656,7 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.inputTokens = 0
 		m.outputTokens = 0
+		m.ctxTokens = 0
 		m.currentSession = session.New(m.activeModel)
 		m.updateViewportContent()
 		return m, nil
@@ -750,6 +753,7 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.inputTokens = 0
 		m.outputTokens = 0
+		m.ctxTokens = 0
 		m.currentSession = session.New(m.activeModel)
 		m.currentSession.Name = name
 		m.updateViewportContent()
@@ -812,6 +816,11 @@ func (m *model) startStream(input string) tea.Cmd {
 
 	if prompt, ok := cavemanPrompts[m.currentSession.CavemanMode]; ok {
 		msgs = append([]llm.Message{{Role: "system", Content: prompt}}, msgs...)
+	}
+
+	m.ctxTokens = 0
+	for _, msg := range msgs {
+		m.ctxTokens += session.EstimateTokens(msg.Content)
 	}
 
 	sub := make(chan tea.Msg, 128)
@@ -944,7 +953,6 @@ func (m *model) renderStatusBar() string {
 		w = 80
 	}
 	modelStr := lipgloss.NewStyle().Foreground(assistantColor).Render(" " + m.activeModel + " ")
-	ctxTok := m.inputTokens + m.outputTokens
 	hasSummary := m.currentSession.Summary != ""
 	var summaryTag string
 	if hasSummary {
@@ -955,7 +963,7 @@ func (m *model) renderStatusBar() string {
 	if cavMode != "" {
 		cavTag = " cav:" + cavMode
 	}
-	tokens := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %din/%dout  ctx %dtok%s%s ", m.inputTokens, m.outputTokens, ctxTok, summaryTag, cavTag))
+	tokens := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %din/%dout  ctx %dtok%s%s ", m.inputTokens, m.outputTokens, m.ctxTokens, summaryTag, cavTag))
 	mid := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %d msgs ", len(m.messages)))
 	left := mid + tokens
 	spaces := w - lipgloss.Width(left) - lipgloss.Width(modelStr)
