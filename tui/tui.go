@@ -60,42 +60,44 @@ func (i sessionItem) Title() string       { return i.sess.Name }
 func (i sessionItem) Description() string { return fmt.Sprintf("%s • %d msgs", i.sess.CreatedAt.Format("2006-01-02 15:04"), len(i.sess.Messages)) }
 func (i sessionItem) FilterValue() string { return i.sess.Name + " " + i.sess.CreatedAt.Format("2006-01-02") }
 
-type model struct {
-	state           state
-	cfg             *config.Config
-	messages        []chatMessage
-	input           textinput.Model
-	vp              viewport.Model
-	mdList          list.Model
-	activeModel     string
-	activeProvider  *config.Provider
-	loading         bool
-	currentResp     string
-	sub             chan tea.Msg
-	ready           bool
-	width           int
-	height          int
-	spinner         spinner.Model
-	cancel          context.CancelFunc
-	history         []string
-	historyIdx      int
-	savedInput      string
-	currentSession  *session.Session
-	sessions        []*session.Session
-	renameTarget    *session.Session
-	rendered        []string
-	filterText      string
-	suggestions     []string
-	suggestionIdx   int
-	showSuggestions bool
-	inputTokens     int
-	outputTokens    int
-	ctxTokens       int
-	ctxMgr          *ctxmgr.Manager
-	autoScroll      bool
-	pastedContent   string
-	pastedLines     int
-}
+	type model struct {
+		state           state
+		cfg             *config.Config
+		messages        []chatMessage
+		input           textinput.Model
+		vp              viewport.Model
+		mdList          list.Model
+		activeModel     string
+		activeProvider  *config.Provider
+		loading         bool
+		currentResp     string
+		sub             chan tea.Msg
+		ready           bool
+		width           int
+		height          int
+		spinner         spinner.Model
+		cancel          context.CancelFunc
+		history         []string
+		historyIdx      int
+		savedInput      string
+		currentSession  *session.Session
+		sessions        []*session.Session
+		renameTarget    *session.Session
+		rendered        []string
+		filterText      string
+		suggestions     []string
+		suggestionIdx   int
+		showSuggestions bool
+		inputTokens     int
+		outputTokens    int
+		ctxTokens       int
+		ctxMgr          *ctxmgr.Manager
+		autoScroll      bool
+		pastedContent   string
+		pastedLines     int
+		pasting         bool
+		pasteBuf        strings.Builder
+	}
 
 var cavemanPrompts = map[string]string{
 	"lite":  "Lite compact mode. No filler (just/really/basically/actually/simply). No pleasantries (sure/certainly/of course). No hedging. Keep full sentences and articles. Technical terms exact. Never announce or name the style. Preserve my language.",
@@ -248,6 +250,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if m.pasting {
+			m.pasteBuf.WriteString(msg.Key().Text)
+			return m, nil
+		}
 		switch m.state {
 		case modelListState:
 			return m.handleModelListKey(msg)
@@ -262,7 +268,37 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.autoScroll = m.vp.AtBottom()
 		return m, cmd
 
+	case tea.PasteStartMsg:
+		m.pasting = true
+		m.pasteBuf.Reset()
+		return m, nil
+
+	case tea.PasteEndMsg:
+		m.pasting = false
+		pasted := m.pasteBuf.String()
+		if pasted == "" {
+			return m, nil
+		}
+		lines := strings.Split(pasted, "\n")
+		n := len(lines)
+		if n > 1 && lines[n-1] == "" {
+			n--
+		}
+		if n > 1 {
+			m.pastedContent = pasted
+			m.pastedLines = n
+			m.input.SetValue("")
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.PasteMsg{Content: pasted})
+		return m, cmd
+
 	case tea.PasteMsg:
+		if m.pasting {
+			m.pasteBuf.WriteString(msg.Content)
+			return m, nil
+		}
 		pasted := msg.Content
 		lines := strings.Split(pasted, "\n")
 		n := len(lines)
@@ -405,6 +441,19 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 		input := m.input.Value()
+
+		// Fallback: catch multi-line from non-bracketed paste
+		if m.pastedContent == "" && strings.Contains(input, "\n") {
+			n := strings.Count(input, "\n") + 1
+			if strings.HasSuffix(input, "\n") {
+				n--
+			}
+			m.pastedContent = input
+			m.pastedLines = n
+			m.input.SetValue("")
+			return m, nil
+		}
+
 		if m.pastedContent != "" {
 			input = m.pastedContent
 			m.pastedContent = ""
