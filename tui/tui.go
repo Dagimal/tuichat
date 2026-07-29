@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"tuichat/config"
 	ctxmgr "tuichat/context"
@@ -93,6 +94,8 @@ type model struct {
 	ctxTokens       int
 	ctxMgr          *ctxmgr.Manager
 	autoScroll      bool
+	pasting         bool
+	lastKeyTime     time.Time
 }
 
 var cavemanPrompts = map[string]string{
@@ -269,6 +272,24 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleChatKey(msg)
 
+	case tea.PasteStartMsg:
+		m.pasting = true
+		return m, nil
+
+	case tea.PasteEndMsg:
+		m.pasting = false
+		return m, nil
+
+	case tea.PasteMsg:
+		if !m.pasting {
+			m.pasting = true
+			defer func() { m.pasting = false }()
+		}
+		m.input.SetValue(m.input.Value() + msg.Content)
+		m.input.CursorEnd()
+		m.resizeViewport()
+		return m, nil
+
 	case tea.MouseMsg:
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
@@ -371,6 +392,13 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 		input := m.input.Value()
+
+		// Paste detection: Enter inserts newline instead of sending
+		if m.pasting || (!m.lastKeyTime.IsZero() && time.Since(m.lastKeyTime) < 50*time.Millisecond) {
+			m.input.SetValue(input + "\n")
+			m.input.CursorEnd()
+			return m, nil
+		}
 
 		// Backslash-newline escape (like opencode)
 		if len(input) > 0 && input[len(input)-1] == '\\' {
@@ -484,6 +512,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.lastKeyTime = time.Now()
 	m.updateSuggestions()
 	m.resizeViewport()
 	return m, cmd
