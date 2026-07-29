@@ -48,6 +48,8 @@ API keys prefixed with `$` are read from environment variables.
 | Switch model | `/model` or `/switch` |
 | Manage sessions | `/sessions` |
 | Clear history | `/reset` |
+| Compact context | `/compact` — summarize old messages to save tokens |
+| Caveman mode | `/caveman [lite|full|ultra|off]` — ultra-compact responses |
 | New session | `/new <name>` |
 | Rename session | `/rename <name>` or `Ctrl+R` in session list |
 | Delete session | `Ctrl+D` in session list |
@@ -92,5 +94,8 @@ input/output token counts and total context tokens (`ctx`) sent per request.
 - **Session management** — auto-save, browse, rename, delete, filter
 - **Command auto-complete** — type `/` to see available commands
 - **Token counter** — per-message and session totals, including context window
+- **Hybrid context management** — auto-summarizes old messages when token budget exceeded, keeps last N messages intact for detailed context. Tokens shown in status bar with `sum` indicator
+- **Caveman mode** — `/caveman [lite|full|ultra|off]` injects system prompt for ultra-compressed AI responses. Cuts output tokens up to 75%. Level persists per session
+- **Scroll-while-streaming** — viewport stays scrollable during response generation. Auto-scroll resumes when you scroll to bottom
 - **Mouse support** — scroll wheel, `Shift`+drag to copy text
 - **Rendered message cache** — glamour output cached per message, no re-render on stream updates
