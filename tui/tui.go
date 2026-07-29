@@ -6,17 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"tuichat/config"
 	ctxmgr "tuichat/context"
 	"tuichat/llm"
 	"tuichat/session"
 
-	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
-	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
@@ -38,6 +36,7 @@ type chatMessage struct {
 
 type streamProgressMsg string
 type streamDoneMsg struct{}
+type editorResultMsg struct{ content string }
 type errMsg struct{ err error }
 
 func (e errMsg) Error() string { return e.err.Error() }
@@ -65,7 +64,7 @@ type model struct {
 	state           state
 	cfg             *config.Config
 	messages        []chatMessage
-	input           textarea.Model
+	input           textinput.Model
 	vp              viewport.Model
 	mdList          list.Model
 	activeModel     string
@@ -94,8 +93,6 @@ type model struct {
 	ctxTokens       int
 	ctxMgr          *ctxmgr.Manager
 	autoScroll      bool
-	pasting         bool
-	lastKeyTime     time.Time
 }
 
 var cavemanPrompts = map[string]string{
@@ -131,18 +128,11 @@ var commands = []struct {
 }
 
 func New(cfg *config.Config) *model {
-	ta := textarea.New()
-	ta.Placeholder = "Type a message... (/model, /new, /edit, /sessions, /reset, /exit)"
-	ta.ShowLineNumbers = false
-	ta.CharLimit = 0
-	ta.MinHeight = 1
-	ta.MaxHeight = 5
-	ta.DynamicHeight = true
-	ta.SetWidth(80)
-	ta.SetHeight(1)
-	ta.Focus()
-
-	ta.KeyMap.LineEnd = key.NewBinding(key.WithKeys("end"))
+	ti := textinput.New()
+	ti.Placeholder = "Type a message... (/model, /new, /edit, /sessions, /reset, /exit)"
+	ti.Focus()
+	ti.CharLimit = 0
+	ti.SetWidth(80)
 
 	s := spinner.New(spinner.WithSpinner(spinner.Dot))
 
@@ -175,13 +165,14 @@ func New(cfg *config.Config) *model {
 	l.SetFilteringEnabled(true)
 	l.DisableQuitKeybindings()
 
+	// Try to resume last session
 	budget := cfg.TokenBudget
 	if budget <= 0 {
 		budget = 40000
 	}
 	m := &model{
 		cfg:            cfg,
-		input:          ta,
+		input:          ti,
 		mdList:         l,
 		activeModel:    activeModel,
 		activeProvider: activeProvider,
@@ -231,18 +222,7 @@ func buildSessionItems(sessions []*session.Session) []list.Item {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, m.spinner.Tick)
-}
-
-func (m *model) resizeViewport() {
-	if m.height == 0 {
-		return
-	}
-	ih := m.input.Height()
-	if ih < 1 {
-		ih = 1
-	}
-	m.vp.SetHeight(m.height - 3 - ih - m.suggestLines())
+	return tea.Batch(textinput.Blink, m.spinner.Tick)
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -252,10 +232,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.vp = viewport.New(
 			viewport.WithWidth(msg.Width),
+			viewport.WithHeight(msg.Height-4-m.suggestLines()),
 		)
 		m.vp.YPosition = 0
 		m.vp.MouseWheelEnabled = true
-		m.resizeViewport()
 		m.input.SetWidth(msg.Width - 4)
 		m.mdList.SetWidth(msg.Width)
 		m.mdList.SetHeight(msg.Height - 4)
@@ -272,28 +252,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleChatKey(msg)
 
-	case tea.PasteStartMsg:
-		m.pasting = true
-		return m, nil
-
-	case tea.PasteEndMsg:
-		m.pasting = false
-		return m, nil
-
-	case tea.PasteMsg:
-		if !m.pasting {
-			m.pasting = true
-			defer func() { m.pasting = false }()
-		}
-		m.input.SetValue(m.input.Value() + msg.Content)
-		m.input.CursorEnd()
-		m.resizeViewport()
-		return m, nil
-
 	case tea.MouseMsg:
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
 		m.autoScroll = m.vp.AtBottom()
+		return m, cmd
+
+	case tea.PasteMsg:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
 		return m, cmd
 
 	case streamProgressMsg:
@@ -319,6 +286,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateViewportContent()
 		if m.autoScroll {
 			m.vp.GotoBottom()
+		}
+		return m, nil
+
+	case editorResultMsg:
+		content := strings.TrimSpace(msg.content)
+		if content != "" {
+			m.input.SetValue(content)
+			m.input.CursorEnd()
 		}
 		return m, nil
 
@@ -375,7 +350,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.CursorEnd()
 			m.showSuggestions = false
 			m.suggestions = nil
-			m.resizeViewport()
+			m.vp.SetHeight(m.height - 4)
 			return m, nil
 		}
 		if m.loading {
@@ -392,22 +367,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 		input := m.input.Value()
-
-		// Paste detection: Enter inserts newline instead of sending
-		if m.pasting || (!m.lastKeyTime.IsZero() && time.Since(m.lastKeyTime) < 50*time.Millisecond) {
-			m.input.SetValue(input + "\n")
-			m.input.CursorEnd()
-			return m, nil
-		}
-
-		// Backslash-newline escape (like opencode)
-		if len(input) > 0 && input[len(input)-1] == '\\' {
-			m.input.SetValue(input[:len(input)-1] + "\n")
-			m.input.CursorEnd()
-			return m, nil
-		}
-
-		m.input.Reset()
+		m.input.SetValue("")
 		input = strings.TrimSpace(input)
 
 		if strings.HasPrefix(input, "/") {
@@ -431,7 +391,6 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.currentResp = ""
 		m.autoScroll = true
-		m.resizeViewport()
 		m.updateViewportContent()
 		m.vp.GotoBottom()
 		return m, m.startStream(input)
@@ -443,7 +402,9 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.CursorEnd()
 			m.showSuggestions = false
 			m.suggestions = nil
-			m.resizeViewport()
+			if m.height > 0 {
+				m.vp.SetHeight(m.height - 4)
+			}
 			return m, nil
 		}
 		return m, nil
@@ -452,21 +413,40 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.showSuggestions {
 			m.showSuggestions = false
 			m.suggestions = nil
-			m.resizeViewport()
+			if m.height > 0 {
+				m.vp.SetHeight(m.height - 4)
+			}
 			return m, nil
 		}
 		return m, nil
 
-	case "up":
+		case "up":
 		if m.showSuggestions {
 			if m.suggestionIdx > 0 {
 				m.suggestionIdx--
 			}
 			return m, nil
 		}
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
+		if m.historyIdx != -1 || len(m.history) > 0 {
+			if m.historyIdx == -1 {
+				m.historyIdx = len(m.history) - 1
+				m.savedInput = m.input.Value()
+			} else if m.historyIdx > 0 {
+				m.historyIdx--
+			} else {
+				var vpCmd tea.Cmd
+				m.vp, vpCmd = m.vp.Update(msg)
+				m.autoScroll = m.vp.AtBottom()
+				return m, vpCmd
+			}
+			m.input.SetValue(m.history[m.historyIdx])
+			m.input.CursorEnd()
+			return m, nil
+		}
+		var vpCmd tea.Cmd
+		m.vp, vpCmd = m.vp.Update(msg)
+		m.autoScroll = m.vp.AtBottom()
+		return m, vpCmd
 
 	case "down":
 		if m.showSuggestions {
@@ -475,27 +455,6 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
-
-	case "alt+up":
-		if m.historyIdx != -1 || len(m.history) > 0 {
-			if m.historyIdx == -1 {
-				m.historyIdx = len(m.history) - 1
-				m.savedInput = m.input.Value()
-			} else if m.historyIdx > 0 {
-				m.historyIdx--
-			} else {
-				return m, nil
-			}
-			m.input.SetValue(m.history[m.historyIdx])
-			m.input.CursorEnd()
-			return m, nil
-		}
-		return m, nil
-
-	case "alt+down":
 		if m.historyIdx != -1 {
 			if m.historyIdx < len(m.history)-1 {
 				m.historyIdx++
@@ -507,14 +466,15 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.CursorEnd()
 			return m, nil
 		}
-		return m, nil
+		var vpCmd tea.Cmd
+		m.vp, vpCmd = m.vp.Update(msg)
+		m.autoScroll = m.vp.AtBottom()
+		return m, vpCmd
 	}
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
-	m.lastKeyTime = time.Now()
 	m.updateSuggestions()
-	m.resizeViewport()
 	return m, cmd
 }
 
@@ -534,7 +494,9 @@ func (m *model) updateSuggestions() {
 	if len(filtered) == 0 {
 		m.showSuggestions = false
 		m.suggestions = nil
-		m.resizeViewport()
+		if m.height > 0 {
+			m.vp.SetHeight(m.height - 4)
+		}
 		return
 	}
 	m.suggestions = filtered
@@ -542,7 +504,9 @@ func (m *model) updateSuggestions() {
 		m.suggestionIdx = len(m.suggestions) - 1
 	}
 	m.showSuggestions = true
-	m.resizeViewport()
+	if m.height > 0 {
+		m.vp.SetHeight(m.height - 4 - m.suggestLines())
+	}
 }
 
 func (m *model) handleModelListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -633,6 +597,7 @@ func (m *model) handleSessionListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Printable character → filter sessions manually
 	k := msg.Keystroke()
 	if len(k) == 1 && k[0] >= ' ' && k[0] <= '~' {
 		m.filterText += k
@@ -857,10 +822,7 @@ func (m *model) openEditor() tea.Cmd {
 		if rerr != nil {
 			return errMsg{rerr}
 		}
-		m.input.SetValue(string(data))
-		m.input.CursorEnd()
-		m.resizeViewport()
-		return nil
+		return editorResultMsg{content: string(data)}
 	})
 }
 
