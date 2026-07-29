@@ -686,22 +686,37 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.input.Blur()
 		return m, cmd
 
-	case input == "/caveman":
-		levels := []string{"lite", "full", "ultra"}
+	case input == "/caveman", strings.HasPrefix(input, "/caveman "):
 		s := m.currentSession
-		if s.CavemanMode == "" {
-			s.CavemanMode = "lite"
-		} else {
-			for i, l := range levels {
-				if l == s.CavemanMode {
-					if i+1 < len(levels) {
-						s.CavemanMode = levels[i+1]
-					} else {
-						s.CavemanMode = ""
+		arg := strings.TrimSpace(strings.TrimPrefix(input, "/caveman"))
+		levels := []string{"lite", "full", "ultra"}
+		switch arg {
+		case "lite", "full", "ultra":
+			s.CavemanMode = arg
+		case "off":
+			s.CavemanMode = ""
+		case "":
+			if s.CavemanMode == "" {
+				s.CavemanMode = "lite"
+			} else {
+				for i, l := range levels {
+					if l == s.CavemanMode {
+						if i+1 < len(levels) {
+							s.CavemanMode = levels[i+1]
+						} else {
+							s.CavemanMode = ""
+						}
+						break
 					}
-					break
 				}
 			}
+		default:
+			m.messages = append(m.messages, chatMessage{
+				role: "system", content: "Usage: /caveman [lite|full|ultra|off]",
+			})
+			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+			m.updateViewportContent()
+			return m, nil
 		}
 		s.Save()
 		status := s.CavemanMode
