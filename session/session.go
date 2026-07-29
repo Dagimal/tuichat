@@ -25,6 +25,7 @@ type Session struct {
 	Summary         string    `json:"summary,omitempty"`
 	SummaryTokens   int       `json:"summary_tokens,omitempty"`
 	LastSummaryIdx  int       `json:"last_summary_idx,omitempty"`
+	CavemanMode     string    `json:"caveman,omitempty"`
 }
 
 const lastSessionFile = "LAST"

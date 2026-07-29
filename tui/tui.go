@@ -91,6 +91,12 @@ type model struct {
 	autoScroll      bool
 }
 
+var cavemanPrompts = map[string]string{
+	"lite":  "You are in compact mode. Be concise. Use short sentences. Avoid filler words and pleasantries.",
+	"full":  "Caveman mode. Be brief. Use short replies. Drop pleasantries and greetings. Use sentence fragments when clear. No hedging or unnecessary explanation.",
+	"ultra": "Ultra caveman mode. Max 2-3 sentences per response. No greetings or pleasantries. Drop articles (a/an/the) when possible. Use technical terms exactly. One word answers when sufficient. No explanations unless asked.",
+}
+
 var (
 	userColor       = lipgloss.Color("#7D56F4")
 	assistantColor  = lipgloss.Color("#00D68F")
@@ -110,6 +116,7 @@ var commands = []struct {
 	{"/sessions", "Manage sessions"},
 	{"/reset", "Clear history"},
 	{"/compact", "Summarize old messages to save tokens"},
+	{"/caveman", "Toggle compact mode: off/lite/full/ultra"},
 	{"/new", "New session"},
 	{"/rename", "Rename session"},
 	{"/exit", "Quit"},
@@ -679,6 +686,36 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.input.Blur()
 		return m, cmd
 
+	case input == "/caveman":
+		levels := []string{"lite", "full", "ultra"}
+		s := m.currentSession
+		if s.CavemanMode == "" {
+			s.CavemanMode = "lite"
+		} else {
+			for i, l := range levels {
+				if l == s.CavemanMode {
+					if i+1 < len(levels) {
+						s.CavemanMode = levels[i+1]
+					} else {
+						s.CavemanMode = ""
+					}
+					break
+				}
+			}
+		}
+		s.Save()
+		status := s.CavemanMode
+		if status == "" {
+			status = "off"
+		}
+		m.messages = append(m.messages, chatMessage{
+			role: "system", content: fmt.Sprintf("Caveman mode: %s", status),
+		})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		m.vp.GotoBottom()
+		return m, nil
+
 	case strings.HasPrefix(input, "/new "):
 		name := strings.TrimSpace(strings.TrimPrefix(input, "/new "))
 		if name == "" {
@@ -756,6 +793,10 @@ func (m *model) startStream(input string) tea.Cmd {
 		msgs = m.ctxMgr.PrepareMessages(sessMsgs, summary)
 	} else {
 		msgs = m.ctxMgr.PrepareMessages(sessMsgs, "")
+	}
+
+	if prompt, ok := cavemanPrompts[m.currentSession.CavemanMode]; ok {
+		msgs = append([]llm.Message{{Role: "system", Content: prompt}}, msgs...)
 	}
 
 	sub := make(chan tea.Msg, 128)
@@ -894,7 +935,12 @@ func (m *model) renderStatusBar() string {
 	if hasSummary {
 		summaryTag = " sum"
 	}
-	tokens := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %din/%dout  ctx %dtok%s ", m.inputTokens, m.outputTokens, ctxTok, summaryTag))
+	cavMode := m.currentSession.CavemanMode
+	var cavTag string
+	if cavMode != "" {
+		cavTag = " cav:" + cavMode
+	}
+	tokens := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %din/%dout  ctx %dtok%s%s ", m.inputTokens, m.outputTokens, ctxTok, summaryTag, cavTag))
 	mid := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %d msgs ", len(m.messages)))
 	left := mid + tokens
 	spaces := w - lipgloss.Width(left) - lipgloss.Width(modelStr)
