@@ -92,9 +92,9 @@ type model struct {
 }
 
 var cavemanPrompts = map[string]string{
-	"lite":  "You are in compact mode. Be concise. Use short sentences. Avoid filler words and pleasantries.",
-	"full":  "Caveman mode. Be brief. Use short replies. Drop pleasantries and greetings. Use sentence fragments when clear. No hedging or unnecessary explanation.",
-	"ultra": "Ultra caveman mode. Max 2-3 sentences per response. No greetings or pleasantries. Drop articles (a/an/the) when possible. Use technical terms exactly. One word answers when sufficient. No explanations unless asked.",
+	"lite":  "Lite compact mode. No filler (just/really/basically/actually/simply). No pleasantries (sure/certainly/of course). No hedging. Keep full sentences and articles. Technical terms exact. Never announce or name the style. Preserve my language.",
+	"full":  "Full compact mode. Drop articles (a/an/the). Drop filler (just/really/basically/actually/simply). Drop pleasantries (sure/certainly/of course). Use short synonyms. Fragments OK. No decorative emoji/tables. No explanations unless asked. Technical terms exact. Standard acronyms OK (DB/API/HTTP); no invented abbreviations. Pattern: [thing] [action] [reason]. [next step]. Never announce or name the style. Preserve my language.",
+	"ultra": "Ultra compact mode. Drop articles/conjunctions where possible. Arrows for causality (X → Y). One word when enough. Abbreviate prose words only (DB/auth/config/req/res) — NEVER abbreviate code symbols, function names, API names, error strings. No greetings. Max 2-3 sentences. Technical terms exact. Never announce or name the style. Preserve my language.",
 }
 
 var (
