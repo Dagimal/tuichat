@@ -16,12 +16,15 @@ type Message struct {
 }
 
 type Session struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Messages  []Message `json:"messages"`
-	Model     string    `json:"model"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+	Messages        []Message `json:"messages"`
+	Model           string    `json:"model"`
+	Summary         string    `json:"summary,omitempty"`
+	SummaryTokens   int       `json:"summary_tokens,omitempty"`
+	LastSummaryIdx  int       `json:"last_summary_idx,omitempty"`
 }
 
 const lastSessionFile = "LAST"

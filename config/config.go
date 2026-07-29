@@ -22,6 +22,7 @@ type Provider struct {
 type Config struct {
 	DefaultModel string     `yaml:"default_model"`
 	Providers    []Provider `yaml:"providers"`
+	TokenBudget  int        `yaml:"token_budget"`
 }
 
 func Load(path string) (*Config, error) {

@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+const maxRetries = 2
+
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -32,7 +34,56 @@ type chatChunk struct {
 	Choices []chunkChoice `json:"choices"`
 }
 
+type chatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+}
+
 type Callback func(chunk string, done bool, err error)
+
+func Chat(baseURL, apiKey, model string, messages []Message) (string, error) {
+	body, err := json.Marshal(chatRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   false,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal: %w", err)
+	}
+
+	url := strings.TrimRight(baseURL, "/") + "/chat/completions"
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("API %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var chatResp chatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return "", fmt.Errorf("no choices in response")
+	}
+
+	return chatResp.Choices[0].Message.Content, nil
+}
 
 func StreamChat(baseURL, apiKey, model string, messages []Message, cb Callback) error {
 	body, err := json.Marshal(chatRequest{

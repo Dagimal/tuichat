@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"tuichat/config"
+	ctxmgr "tuichat/context"
 	"tuichat/llm"
 	"tuichat/session"
 
@@ -86,6 +87,8 @@ type model struct {
 	showSuggestions bool
 	inputTokens     int
 	outputTokens    int
+	ctxMgr          *ctxmgr.Manager
+	autoScroll      bool
 }
 
 var (
@@ -106,6 +109,7 @@ var commands = []struct {
 	{"/model", "Switch model"},
 	{"/sessions", "Manage sessions"},
 	{"/reset", "Clear history"},
+	{"/compact", "Summarize old messages to save tokens"},
 	{"/new", "New session"},
 	{"/rename", "Rename session"},
 	{"/exit", "Quit"},
@@ -150,6 +154,10 @@ func New(cfg *config.Config) *model {
 	l.DisableQuitKeybindings()
 
 	// Try to resume last session
+	budget := cfg.TokenBudget
+	if budget <= 0 {
+		budget = 40000
+	}
 	m := &model{
 		cfg:            cfg,
 		input:          ti,
@@ -158,6 +166,8 @@ func New(cfg *config.Config) *model {
 		activeProvider: activeProvider,
 		sub:            make(chan tea.Msg, 128),
 		spinner:        s,
+		ctxMgr:         ctxmgr.New(budget, 20),
+		autoScroll:     true,
 	}
 	m.currentSession = session.New(activeModel)
 	return m
@@ -233,6 +243,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		var cmd tea.Cmd
 		m.vp, cmd = m.vp.Update(msg)
+		m.autoScroll = m.vp.AtBottom()
 		return m, cmd
 
 	case tea.PasteMsg:
@@ -243,7 +254,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamProgressMsg:
 		m.currentResp += string(msg)
 		m.updateViewportContent()
-		m.vp.GotoBottom()
+		if m.autoScroll {
+			m.vp.GotoBottom()
+		}
 		return m, m.waitForStream()
 
 	case streamDoneMsg:
@@ -259,7 +272,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentResp = ""
 		m.loading = false
 		m.updateViewportContent()
-		m.vp.GotoBottom()
+		if m.autoScroll {
+			m.vp.GotoBottom()
+		}
 		return m, nil
 
 	case errMsg:
@@ -352,6 +367,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.currentSession.Save()
 		m.loading = true
 		m.currentResp = ""
+		m.autoScroll = true
 		m.updateViewportContent()
 		m.vp.GotoBottom()
 		return m, m.startStream(input)
@@ -381,7 +397,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case "up":
+		case "up":
 		if m.showSuggestions {
 			if m.suggestionIdx > 0 {
 				m.suggestionIdx--
@@ -397,6 +413,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			} else {
 				var vpCmd tea.Cmd
 				m.vp, vpCmd = m.vp.Update(msg)
+				m.autoScroll = m.vp.AtBottom()
 				return m, vpCmd
 			}
 			m.input.SetValue(m.history[m.historyIdx])
@@ -405,6 +422,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		var vpCmd tea.Cmd
 		m.vp, vpCmd = m.vp.Update(msg)
+		m.autoScroll = m.vp.AtBottom()
 		return m, vpCmd
 
 	case "down":
@@ -427,6 +445,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		var vpCmd tea.Cmd
 		m.vp, vpCmd = m.vp.Update(msg)
+		m.autoScroll = m.vp.AtBottom()
 		return m, vpCmd
 	}
 
@@ -599,6 +618,7 @@ func (m *model) loadSession(s *session.Session) {
 	m.activeModel = s.Model
 	m.loading = false
 	m.currentResp = ""
+	m.autoScroll = true
 	m.updateViewportContent()
 	m.vp.GotoBottom()
 }
@@ -713,14 +733,30 @@ func (m *model) startStream(input string) tea.Cmd {
 	apiKey := m.activeProvider.APIKey
 	modelID := m.activeModel
 
-	msgs := make([]llm.Message, 0, len(m.messages))
-	for _, msg := range m.messages {
-		if msg.role == "system" {
-			continue
+	sessMsgs := m.currentSession.Messages
+	summary := m.currentSession.Summary
+	var msgs []llm.Message
+
+	if m.ctxMgr.NeedsSummary(sessMsgs) {
+		needsNewSummary := summary == "" || m.currentSession.LastSummaryIdx < len(sessMsgs)-m.ctxMgr.WindowSize
+		if needsNewSummary {
+			prompt := m.ctxMgr.BuildSummaryPrompt(sessMsgs, summary, m.currentSession.LastSummaryIdx)
+			newSummary, err := llm.Chat(baseURL, apiKey, modelID, prompt)
+			if err == nil && newSummary != "" {
+				summary = newSummary
+				m.currentSession.Summary = newSummary
+				m.currentSession.SummaryTokens = session.EstimateTokens(newSummary)
+				m.currentSession.LastSummaryIdx = len(sessMsgs) - m.ctxMgr.WindowSize
+				if m.currentSession.LastSummaryIdx < 0 {
+					m.currentSession.LastSummaryIdx = 0
+				}
+				m.currentSession.Save()
+			}
 		}
-		msgs = append(msgs, llm.Message{Role: msg.role, Content: msg.content})
+		msgs = m.ctxMgr.PrepareMessages(sessMsgs, summary)
+	} else {
+		msgs = m.ctxMgr.PrepareMessages(sessMsgs, "")
 	}
-	msgs = append(msgs, llm.Message{Role: "user", Content: input})
 
 	sub := make(chan tea.Msg, 128)
 	m.sub = sub
@@ -853,7 +889,12 @@ func (m *model) renderStatusBar() string {
 	}
 	modelStr := lipgloss.NewStyle().Foreground(assistantColor).Render(" " + m.activeModel + " ")
 	ctxTok := m.inputTokens + m.outputTokens
-	tokens := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %din/%dout  ctx %dtok ", m.inputTokens, m.outputTokens, ctxTok))
+	hasSummary := m.currentSession.Summary != ""
+	var summaryTag string
+	if hasSummary {
+		summaryTag = " sum"
+	}
+	tokens := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %din/%dout  ctx %dtok%s ", m.inputTokens, m.outputTokens, ctxTok, summaryTag))
 	mid := lipgloss.NewStyle().Foreground(systemColor).Render(fmt.Sprintf(" %d msgs ", len(m.messages)))
 	left := mid + tokens
 	spaces := w - lipgloss.Width(left) - lipgloss.Width(modelStr)
