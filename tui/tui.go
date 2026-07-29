@@ -132,8 +132,11 @@ func New(cfg *config.Config) *model {
 	ta.Placeholder = "Type a message... (/model, /new, /edit, /sessions, /reset, /exit)"
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
-	ta.MaxHeight = 6
+	ta.MinHeight = 1
+	ta.MaxHeight = 5
+	ta.DynamicHeight = true
 	ta.SetWidth(80)
+	ta.SetHeight(1)
 	ta.Focus()
 
 	ta.KeyMap.LineEnd = key.NewBinding(key.WithKeys("end"))
@@ -228,12 +231,15 @@ func (m *model) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink, m.spinner.Tick)
 }
 
-func (m *model) inputHeight() int {
-	h := m.input.Height()
-	if h < 1 {
-		h = 1
+func (m *model) resizeViewport() {
+	if m.height == 0 {
+		return
 	}
-	return h + 1
+	ih := m.input.Height()
+	if ih < 1 {
+		ih = 1
+	}
+	m.vp.SetHeight(m.height - 3 - ih - m.suggestLines())
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -241,13 +247,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		ih := m.inputHeight()
 		m.vp = viewport.New(
 			viewport.WithWidth(msg.Width),
-			viewport.WithHeight(msg.Height-3-ih-m.suggestLines()),
 		)
 		m.vp.YPosition = 0
 		m.vp.MouseWheelEnabled = true
+		m.resizeViewport()
 		m.input.SetWidth(msg.Width - 4)
 		m.mdList.SetWidth(msg.Width)
 		m.mdList.SetHeight(msg.Height - 4)
@@ -349,8 +354,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.CursorEnd()
 			m.showSuggestions = false
 			m.suggestions = nil
-			ih := m.inputHeight()
-			m.vp.SetHeight(m.height - 3 - ih)
+			m.resizeViewport()
 			return m, nil
 		}
 		if m.loading {
@@ -375,7 +379,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.input.SetValue("")
+		m.input.Reset()
 		input = strings.TrimSpace(input)
 
 		if strings.HasPrefix(input, "/") {
@@ -399,6 +403,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.currentResp = ""
 		m.autoScroll = true
+		m.resizeViewport()
 		m.updateViewportContent()
 		m.vp.GotoBottom()
 		return m, m.startStream(input)
@@ -410,10 +415,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.CursorEnd()
 			m.showSuggestions = false
 			m.suggestions = nil
-			if m.height > 0 {
-				ih := m.inputHeight()
-				m.vp.SetHeight(m.height - 3 - ih)
-			}
+			m.resizeViewport()
 			return m, nil
 		}
 		return m, nil
@@ -422,10 +424,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.showSuggestions {
 			m.showSuggestions = false
 			m.suggestions = nil
-			if m.height > 0 {
-				ih := m.inputHeight()
-				m.vp.SetHeight(m.height - 3 - ih)
-			}
+			m.resizeViewport()
 			return m, nil
 		}
 		return m, nil
@@ -486,6 +485,7 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.updateSuggestions()
+	m.resizeViewport()
 	return m, cmd
 }
 
@@ -505,10 +505,7 @@ func (m *model) updateSuggestions() {
 	if len(filtered) == 0 {
 		m.showSuggestions = false
 		m.suggestions = nil
-		if m.height > 0 {
-			ih := m.inputHeight()
-			m.vp.SetHeight(m.height - 3 - ih)
-		}
+		m.resizeViewport()
 		return
 	}
 	m.suggestions = filtered
@@ -516,10 +513,7 @@ func (m *model) updateSuggestions() {
 		m.suggestionIdx = len(m.suggestions) - 1
 	}
 	m.showSuggestions = true
-	if m.height > 0 {
-		ih := m.inputHeight()
-		m.vp.SetHeight(m.height - 3 - ih - m.suggestLines())
-	}
+	m.resizeViewport()
 }
 
 func (m *model) handleModelListKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -836,6 +830,7 @@ func (m *model) openEditor() tea.Cmd {
 		}
 		m.input.SetValue(string(data))
 		m.input.CursorEnd()
+		m.resizeViewport()
 		return nil
 	})
 }
