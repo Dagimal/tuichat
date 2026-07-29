@@ -48,6 +48,8 @@ API keys prefixed with `$` are read from environment variables.
 | Switch model | `/model` or `/switch` |
 | Manage sessions | `/sessions` |
 | Clear history | `/reset` |
+| Read file | `/read <path> [instruction]` — read a file and optionally ask LLM to process it |
+| Copy code block | `/cp [N|all]` — copy last code block (or by index, or all) to clipboard |
 | Compact context | `/compact` — summarize old messages to save tokens |
 | Caveman mode | `/caveman [lite|full|ultra|off]` — ultra-compact responses |
 | New session | `/new <name>` |
@@ -99,3 +101,5 @@ input/output token counts and total context tokens (`ctx`) sent per request.
 - **Scroll-while-streaming** — viewport stays scrollable during response generation. Auto-scroll resumes when you scroll to bottom
 - **Mouse support** — scroll wheel, `Shift`+drag to copy text
 - **Rendered message cache** — glamour output cached per message, no re-render on stream updates
+- **File reader** — `/read <path> [instruction]` reads any text file into chat. With an instruction, sends file content to LLM for processing (e.g., `/read deploy.yaml add nfs server`)
+- **Clipboard code copy** — `/cp [N|all]` copies the last LLM code block (or by index, or full text) to the system clipboard

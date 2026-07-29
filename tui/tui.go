@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"tuichat/config"
 	ctxmgr "tuichat/context"
 	"tuichat/llm"
@@ -40,6 +42,8 @@ type editorResultMsg struct{ content string }
 type errMsg struct{ err error }
 
 func (e errMsg) Error() string { return e.err.Error() }
+
+type readResultMsg struct{ content string }
 
 type modelItem struct {
 	provider *config.Provider
@@ -121,6 +125,8 @@ var commands = []struct {
 	{"/reset", "Clear history"},
 	{"/compact", "Summarize old messages to save tokens"},
 	{"/caveman", "Toggle compact mode: off/lite/full/ultra"},
+	{"/cp", "Copy last code block: /cp [N|all]"},
+	{"/read", "Read file: /read <path>"},
 	{"/edit", "Open editor (ctrl+e)"},
 	{"/new", "New session"},
 	{"/rename", "Rename session"},
@@ -129,7 +135,7 @@ var commands = []struct {
 
 func New(cfg *config.Config) *model {
 	ti := textinput.New()
-	ti.Placeholder = "Type a message... (/model, /new, /edit, /sessions, /reset, /exit)"
+	ti.Placeholder = "Type a message... (/read, /model, /new, /edit, /sessions, /reset, /exit)"
 	ti.Focus()
 	ti.CharLimit = 0
 	ti.SetWidth(80)
@@ -287,6 +293,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.autoScroll {
 			m.vp.GotoBottom()
 		}
+		return m, nil
+
+	case readResultMsg:
+		m.loading = false
+		m.messages = append(m.messages, chatMessage{role: "assistant", content: msg.content})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.outputTokens += session.EstimateTokens(msg.content)
+		m.currentSession.AddMessage("assistant", msg.content)
+		m.currentSession.Save()
+		m.currentResp = ""
+		m.updateViewportContent()
+		m.vp.GotoBottom()
 		return m, nil
 
 	case editorResultMsg:
@@ -704,6 +722,13 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 		m.input.Blur()
 		return m, cmd
 
+	case input == "/cp", strings.HasPrefix(input, "/cp "):
+		arg := ""
+		if strings.HasPrefix(input, "/cp ") {
+			arg = strings.TrimPrefix(input, "/cp ")
+		}
+		return m.handleCopy(arg)
+
 	case input == "/caveman", strings.HasPrefix(input, "/caveman "):
 		s := m.currentSession
 		arg := strings.TrimSpace(strings.TrimPrefix(input, "/caveman"))
@@ -777,6 +802,9 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case input == "/edit":
 		return m, m.openEditor()
 
+	case strings.HasPrefix(input, "/read "):
+		return m.handleRead(strings.TrimPrefix(input, "/read "))
+
 	case strings.HasPrefix(input, "/rename "):
 		name := strings.TrimPrefix(input, "/rename ")
 		if m.currentSession != nil && strings.TrimSpace(name) != "" {
@@ -824,6 +852,225 @@ func (m *model) openEditor() tea.Cmd {
 		}
 		return editorResultMsg{content: string(data)}
 	})
+}
+
+func (m *model) handleRead(arg string) (tea.Model, tea.Cmd) {
+	parts := strings.Fields(arg)
+	if len(parts) == 0 {
+		m.messages = append(m.messages, chatMessage{
+			role: "system", content: "Usage: /read <path> [instruction]",
+		})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	path := parts[0]
+	instruction := strings.Join(parts[1:], " ")
+
+	absPath, err := resolvePath(path)
+	if err != nil {
+		m.messages = append(m.messages, chatMessage{
+			role: "system", content: fmt.Sprintf("error: %v", err),
+		})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		m.messages = append(m.messages, chatMessage{
+			role: "system", content: fmt.Sprintf("error: %v", err),
+		})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	fullInput := fmt.Sprintf("/read %s", arg)
+	m.messages = append(m.messages, chatMessage{role: "user", content: fullInput})
+	m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+	m.history = append(m.history, fullInput)
+	m.historyIdx = -1
+	m.savedInput = ""
+	m.inputTokens += session.EstimateTokens(fullInput)
+
+	if info.IsDir() {
+		entries, err := os.ReadDir(absPath)
+		content := ""
+		if err != nil {
+			content = fmt.Sprintf("error reading directory: %v", err)
+		} else {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			content = fmt.Sprintf("📁 %s (%d items)\n\n%s", absPath, len(names), strings.Join(names, "\n"))
+		}
+		m.messages = append(m.messages, chatMessage{role: "assistant", content: content})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		m.vp.GotoBottom()
+		return m, nil
+	}
+
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		m.messages = append(m.messages, chatMessage{
+			role: "system", content: fmt.Sprintf("error reading file: %v", err),
+		})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	if instruction == "" {
+		content := fmt.Sprintf("📄 %s\n\n%s", absPath, string(data))
+		m.messages = append(m.messages, chatMessage{role: "assistant", content: content})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		m.vp.GotoBottom()
+		return m, nil
+	}
+
+	if m.cancel != nil {
+		m.cancel()
+	}
+
+	if m.activeProvider == nil {
+		m.messages = append(m.messages, chatMessage{
+			role: "system", content: "No provider configured.",
+		})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	msgs := []llm.Message{
+		{Role: "system", Content: "You are a helpful assistant. The user has provided a file and an instruction. Follow the instruction precisely and return the result."},
+		{Role: "user", Content: fmt.Sprintf("File: %s\n\n%s\n\nInstruction: %s", absPath, string(data), instruction)},
+	}
+
+	baseURL := m.activeProvider.BaseURL
+	apiKey := m.activeProvider.APIKey
+	modelID := m.activeModel
+
+	m.loading = true
+	m.currentResp = ""
+
+	sub := make(chan tea.Msg, 128)
+	m.sub = sub
+
+	go func() {
+		response, err := llm.Chat(baseURL, apiKey, modelID, msgs)
+		if err != nil {
+			sub <- errMsg{err}
+			return
+		}
+		sub <- readResultMsg{content: response}
+	}()
+
+	return m, m.waitForStream()
+}
+
+func (m *model) handleCopy(arg string) (tea.Model, tea.Cmd) {
+	var lastMsg string
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].role == "assistant" || m.messages[i].role == "agent" {
+			lastMsg = m.messages[i].content
+			break
+		}
+	}
+	if lastMsg == "" {
+		m.messages = append(m.messages, chatMessage{role: "system", content: "Nothing to copy."})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	arg = strings.TrimSpace(arg)
+	if arg == "all" {
+		if err := clipboard.WriteAll(lastMsg); err != nil {
+			m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("clipboard: %v", err)})
+			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+			m.updateViewportContent()
+			return m, nil
+		}
+		m.messages = append(m.messages, chatMessage{role: "system", content: "Copied all."})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	blocks := extractCodeBlocks(lastMsg)
+	if len(blocks) == 0 {
+		m.messages = append(m.messages, chatMessage{role: "system", content: "No code block found."})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	idx := 0
+	if arg != "" {
+		n, err := fmt.Sscanf(arg, "%d", &idx)
+		if err != nil || n != 1 {
+			m.messages = append(m.messages, chatMessage{role: "system", content: "Usage: /cp [N|all]"})
+			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+			m.updateViewportContent()
+			return m, nil
+		}
+	}
+	if idx < 0 || idx >= len(blocks) {
+		m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("Only %d code blocks.", len(blocks))})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	if err := clipboard.WriteAll(blocks[idx]); err != nil {
+		m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("clipboard: %v", err)})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+	m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("Copied block %d.", idx)})
+	m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+	m.updateViewportContent()
+	m.vp.GotoBottom()
+	return m, nil
+}
+
+var fenceRx = regexp.MustCompile("```[a-zA-Z0-9_+-]*\n?([\\s\\S]*?)```")
+
+func extractCodeBlocks(s string) []string {
+	matches := fenceRx.FindAllStringSubmatch(s, -1)
+	var blocks []string
+	for _, m := range matches {
+		blocks = append(blocks, m[1])
+	}
+	return blocks
+}
+
+func resolvePath(p string) (string, error) {
+	if strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		p = home + p[1:]
+	}
+	if len(p) > 0 && p[0] == '/' {
+		return p, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if cwd[len(cwd)-1] != '/' {
+		cwd += "/"
+	}
+	return cwd + p, nil
 }
 
 func (m *model) startStream(input string) tea.Cmd {
