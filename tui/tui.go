@@ -955,6 +955,11 @@ func (m *model) handleRead(arg string) (tea.Model, tea.Cmd) {
 		{Role: "user", Content: fmt.Sprintf("File: %s\n\n%s\n\nInstruction: %s", absPath, string(data), instruction)},
 	}
 
+	m.ctxTokens = 0
+	for _, msg := range msgs {
+		m.ctxTokens += session.EstimateTokens(msg.Content)
+	}
+
 	baseURL := m.activeProvider.BaseURL
 	apiKey := m.activeProvider.APIKey
 	modelID := m.activeModel
