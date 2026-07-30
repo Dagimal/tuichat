@@ -188,6 +188,9 @@ func New(cfg *config.Config) *model {
 		autoScroll:     true,
 	}
 	m.currentSession = session.New(activeModel)
+	if cfg.CavemanMode != "" {
+		m.currentSession.CavemanMode = cfg.CavemanMode
+	}
 	return m
 }
 

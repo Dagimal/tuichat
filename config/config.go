@@ -23,6 +23,7 @@ type Config struct {
 	DefaultModel string     `yaml:"default_model"`
 	Providers    []Provider `yaml:"providers"`
 	TokenBudget  int        `yaml:"token_budget"`
+	CavemanMode  string     `yaml:"caveman_mode"`
 }
 
 func Load(path string) (*Config, error) {

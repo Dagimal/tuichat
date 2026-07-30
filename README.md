@@ -40,6 +40,10 @@ providers:
 
 API keys prefixed with `$` are read from environment variables.
 
+Optional config:
+- `token_budget`: max context tokens before summarization (default 40000)
+- `caveman_mode`: auto-enable caveman mode on startup (`lite`, `full`, or `ultra`)
+
 ## Usage
 
 | Action | Key / Command |
