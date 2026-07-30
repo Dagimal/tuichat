@@ -1130,6 +1130,7 @@ func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
 			toolDefs = cached
 			send(fmt.Sprintf("tools loaded (%d, cached)", len(toolDefs)))
 		} else {
+			send("listing tools...")
 			tools, err := client.ListTools()
 			if err != nil {
 				stderr := client.Stderr()
@@ -1163,6 +1164,7 @@ func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
 		outTok := 0
 
 		for iter := 0; iter < 8; iter++ {
+			send("thinking...")
 			resp, err := llm.ChatWithTools(baseURL, apiKey, modelID, msgs, toolDefs)
 			if ctx.Err() != nil {
 				return
