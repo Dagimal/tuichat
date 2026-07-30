@@ -1123,6 +1123,7 @@ func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
 			return
 		}
 		defer client.Close()
+		send(fmt.Sprintf("MCP server ready"))
 
 		var toolDefs []llm.ToolDefinition
 		if cached, ok := m.mcpToolCache[serverName]; ok {

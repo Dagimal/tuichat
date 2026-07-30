@@ -1,10 +1,12 @@
 package mcp
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 
 	"tuichat/llm"
@@ -19,7 +21,7 @@ type Tool struct {
 type Client struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
-	dec    *json.Decoder
+	scan   *bufio.Scanner
 	stderr io.ReadCloser
 	nextID int64
 }
@@ -44,7 +46,7 @@ func NewClient(command string, args []string) (*Client, error) {
 	c := &Client{
 		cmd:    cmd,
 		stdin:  stdin,
-		dec:    json.NewDecoder(stdout),
+		scan:   bufio.NewScanner(stdout),
 		stderr: stderr,
 	}
 	if err := c.handshake(); err != nil {
@@ -68,7 +70,6 @@ func (c *Client) handshake() error {
 	}, &serverResult); err != nil {
 		return fmt.Errorf("initialize: %w", err)
 	}
-	// send initialized notification (no id)
 	notif, _ := json.Marshal(map[string]interface{}{
 		"jsonrpc": "2.0",
 		"method":  "notifications/initialized",
@@ -105,7 +106,11 @@ func (c *Client) Call(method string, params interface{}, result interface{}) err
 		return fmt.Errorf("write: %w", err)
 	}
 
-	for {
+	for c.scan.Scan() {
+		line := strings.TrimSpace(c.scan.Text())
+		if line == "" || line[0] != '{' {
+			continue
+		}
 		var resp struct {
 			ID     int64            `json:"id"`
 			Result json.RawMessage  `json:"result"`
@@ -114,8 +119,8 @@ func (c *Client) Call(method string, params interface{}, result interface{}) err
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		if err := c.dec.Decode(&resp); err != nil {
-			return fmt.Errorf("decode: %w", err)
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			continue
 		}
 		if resp.ID == id {
 			if resp.Error != nil {
@@ -127,6 +132,10 @@ func (c *Client) Call(method string, params interface{}, result interface{}) err
 			return nil
 		}
 	}
+	if err := c.scan.Err(); err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	return fmt.Errorf("connection closed")
 }
 
 func (c *Client) ListTools() ([]Tool, error) {
