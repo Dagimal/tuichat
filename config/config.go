@@ -51,15 +51,5 @@ func Load(path string) (*Config, error) {
 			cfg.Providers[i].APIKey = os.Getenv(key[1:])
 		}
 	}
-	if cfg.MCP != nil {
-		for name, entry := range cfg.MCP.Servers {
-			for i, arg := range entry.Args {
-				if strings.HasPrefix(arg, "$") {
-					entry.Args[i] = os.Getenv(arg[1:])
-				}
-			}
-			cfg.MCP.Servers[name] = entry
-		}
-	}
 	return &cfg, nil
 }
