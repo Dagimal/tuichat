@@ -19,11 +19,21 @@ type Provider struct {
 	Models  []Model `yaml:"models"`
 }
 
+type MCPEntry struct {
+	Command string   `yaml:"command"`
+	Args    []string `yaml:"args"`
+}
+
+type MCPConfig struct {
+	Servers map[string]MCPEntry `yaml:"servers"`
+}
+
 type Config struct {
 	DefaultModel string     `yaml:"default_model"`
 	Providers    []Provider `yaml:"providers"`
 	TokenBudget  int        `yaml:"token_budget"`
 	CavemanMode  string     `yaml:"caveman_mode"`
+	MCP          *MCPConfig `yaml:"mcp"`
 }
 
 func Load(path string) (*Config, error) {

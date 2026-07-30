@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"tuichat/config"
 	ctxmgr "tuichat/context"
 	"tuichat/llm"
+	"tuichat/mcp"
 	"tuichat/session"
 
 	"charm.land/bubbles/v2/list"
@@ -44,6 +46,8 @@ type errMsg struct{ err error }
 func (e errMsg) Error() string { return e.err.Error() }
 
 type readResultMsg struct{ content string }
+type mcpProgressMsg string
+type mcpDoneMsg struct{ content string }
 
 type modelItem struct {
 	provider *config.Provider
@@ -97,6 +101,7 @@ type model struct {
 	ctxTokens       int
 	ctxMgr          *ctxmgr.Manager
 	autoScroll      bool
+	mcpToolCache    map[string][]llm.ToolDefinition
 }
 
 var cavemanPrompts = map[string]string{
@@ -127,6 +132,7 @@ var commands = []struct {
 	{"/caveman", "Toggle compact mode: off/lite/full/ultra"},
 	{"/cp", "Copy last code block: /cp [N|all]"},
 	{"/read", "Read file: /read <path>"},
+	{"/mcp", "Run MCP tool: /mcp <server> <instruction>"},
 	{"/edit", "Open editor (ctrl+e)"},
 	{"/new", "New session"},
 	{"/rename", "Rename session"},
@@ -186,6 +192,7 @@ func New(cfg *config.Config) *model {
 		spinner:        s,
 		ctxMgr:         ctxmgr.New(budget, 20),
 		autoScroll:     true,
+		mcpToolCache:   make(map[string][]llm.ToolDefinition),
 	}
 	m.currentSession = session.New(activeModel)
 	if cfg.CavemanMode != "" {
@@ -299,12 +306,34 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case readResultMsg:
+		if !m.loading {
+			return m, nil
+		}
 		m.loading = false
 		m.messages = append(m.messages, chatMessage{role: "assistant", content: msg.content})
 		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
 		m.outputTokens += session.EstimateTokens(msg.content)
 		m.currentSession.AddMessage("assistant", msg.content)
 		m.currentSession.Save()
+		m.currentResp = ""
+		m.updateViewportContent()
+		m.vp.GotoBottom()
+		return m, nil
+
+	case mcpProgressMsg:
+		m.currentResp = m.currentResp + string(msg) + "\n"
+		m.updateViewportContent()
+		if m.autoScroll {
+			m.vp.GotoBottom()
+		}
+		return m, m.waitForStream()
+
+	case mcpDoneMsg:
+		m.loading = false
+		if m.currentResp != "" {
+			m.messages = append(m.messages, chatMessage{role: "assistant", content: strings.TrimSpace(m.currentResp)})
+			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		}
 		m.currentResp = ""
 		m.updateViewportContent()
 		m.vp.GotoBottom()
@@ -438,6 +467,15 @@ func (m *model) handleChatKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.vp.SetHeight(m.height - 4)
 			}
 			return m, nil
+		}
+		if m.loading && m.cancel != nil {
+			m.cancel()
+			m.loading = false
+			m.currentResp = ""
+			m.messages = append(m.messages, chatMessage{role: "system", content: "Cancelled."})
+			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+			m.updateViewportContent()
+			m.vp.GotoBottom()
 		}
 		return m, nil
 
@@ -808,6 +846,9 @@ func (m *model) handleCommand(input string) (tea.Model, tea.Cmd) {
 	case strings.HasPrefix(input, "/read "):
 		return m.handleRead(strings.TrimPrefix(input, "/read "))
 
+	case strings.HasPrefix(input, "/mcp "):
+		return m.handleMCP(strings.TrimPrefix(input, "/mcp "))
+
 	case strings.HasPrefix(input, "/rename "):
 		name := strings.TrimPrefix(input, "/rename ")
 		if m.currentSession != nil && strings.TrimSpace(name) != "" {
@@ -967,11 +1008,21 @@ func (m *model) handleRead(arg string) (tea.Model, tea.Cmd) {
 	m.loading = true
 	m.currentResp = ""
 
+	if m.cancel != nil {
+		m.cancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+
 	sub := make(chan tea.Msg, 128)
 	m.sub = sub
 
 	go func() {
+		defer cancel()
 		response, err := llm.Chat(baseURL, apiKey, modelID, msgs)
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil {
 			sub <- errMsg{err}
 			return
@@ -982,24 +1033,162 @@ func (m *model) handleRead(arg string) (tea.Model, tea.Cmd) {
 	return m, m.waitForStream()
 }
 
-func (m *model) handleCopy(arg string) (tea.Model, tea.Cmd) {
-	var lastMsg string
-	for i := len(m.messages) - 1; i >= 0; i-- {
-		if m.messages[i].role == "assistant" || m.messages[i].role == "agent" {
-			lastMsg = m.messages[i].content
-			break
-		}
+func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
+	parts := strings.Fields(arg)
+	if len(parts) < 2 {
+		m.messages = append(m.messages, chatMessage{role: "system", content: "Usage: /mcp <server> <instruction>"})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
 	}
-	if lastMsg == "" {
-		m.messages = append(m.messages, chatMessage{role: "system", content: "Nothing to copy."})
+	serverName := parts[0]
+	instruction := strings.Join(parts[1:], " ")
+
+	if m.cancel != nil {
+		m.cancel()
+	}
+
+	if m.activeProvider == nil {
+		m.messages = append(m.messages, chatMessage{role: "system", content: "No provider configured."})
 		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
 		m.updateViewportContent()
 		return m, nil
 	}
 
+	if m.cfg.MCP == nil || m.cfg.MCP.Servers == nil {
+		m.messages = append(m.messages, chatMessage{role: "system", content: "No MCP servers configured in config.yaml."})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	entry, ok := m.cfg.MCP.Servers[serverName]
+	if !ok {
+		m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("Unknown MCP server: %s", serverName)})
+		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+		m.updateViewportContent()
+		return m, nil
+	}
+
+	fullInput := fmt.Sprintf("/mcp %s", arg)
+	m.messages = append(m.messages, chatMessage{role: "user", content: fullInput})
+	m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+	m.history = append(m.history, fullInput)
+	m.historyIdx = -1
+	m.savedInput = ""
+	m.loading = true
+	m.currentResp = ""
+
+	sub := make(chan tea.Msg, 128)
+	m.sub = sub
+	baseURL := m.activeProvider.BaseURL
+	apiKey := m.activeProvider.APIKey
+	modelID := m.activeModel
+
+	go func() {
+		send := func(msg string) {
+			select {
+			case sub <- mcpProgressMsg(msg):
+			default:
+			}
+		}
+
+		send(fmt.Sprintf("starting MCP server: %s...", serverName))
+		client, err := mcp.NewClient(entry.Command, entry.Args)
+		if err != nil {
+			select {
+			case sub <- mcpDoneMsg{content: fmt.Sprintf("MCP error: %v", err)}:
+			default:
+			}
+			return
+		}
+		defer client.Close()
+
+		var toolDefs []llm.ToolDefinition
+		if cached, ok := m.mcpToolCache[serverName]; ok {
+			toolDefs = cached
+			send(fmt.Sprintf("tools loaded (%d, cached)", len(toolDefs)))
+		} else {
+			tools, err := client.ListTools()
+			if err != nil {
+				stderr := client.Stderr()
+				if stderr != "" {
+					stderr = "\nstderr: " + stderr
+				}
+				select {
+				case sub <- mcpDoneMsg{content: fmt.Sprintf("MCP list tools error: %v%s", err, stderr)}:
+				default:
+				}
+				return
+			}
+			toolDefs = mcp.ToolsToLLM(tools)
+			m.mcpToolCache[serverName] = toolDefs
+			send(fmt.Sprintf("tools loaded: %d", len(tools)))
+		}
+
+		msgs := []llm.Message{
+			{Role: "system", Content: fmt.Sprintf("You have access to MCP tools on %s. Use them to fulfill the user's request.", serverName)},
+			{Role: "user", Content: instruction},
+		}
+
+		for iter := 0; iter < 8; iter++ {
+			resp, err := llm.ChatWithTools(baseURL, apiKey, modelID, msgs, toolDefs)
+			if err != nil {
+				select {
+				case sub <- mcpDoneMsg{content: fmt.Sprintf("LLM error: %v", err)}:
+				default:
+				}
+				return
+			}
+
+			if len(resp.ToolCalls) == 0 {
+				select {
+				case sub <- mcpDoneMsg{content: resp.Content}:
+				default:
+				}
+				return
+			}
+
+			msgs = append(msgs, resp)
+			for _, tc := range resp.ToolCalls {
+				var args map[string]interface{}
+				json.Unmarshal([]byte(tc.Function.Arguments), &args)
+				send(fmt.Sprintf("calling %s...", tc.Function.Name))
+				result, err := client.CallTool(tc.Function.Name, args)
+				if err != nil {
+					result = fmt.Sprintf("tool error: %v", err)
+				}
+				msgs = append(msgs, llm.Message{Role: "tool", ToolCallID: tc.ID, Content: result})
+			}
+		}
+
+		select {
+		case sub <- mcpDoneMsg{content: "MCP: max iterations reached"}:
+		default:
+		}
+	}()
+
+	return m, m.waitForStream()
+}
+
+func (m *model) handleCopy(arg string) (tea.Model, tea.Cmd) {
 	arg = strings.TrimSpace(arg)
+
 	if arg == "all" {
-		if err := clipboard.WriteAll(lastMsg); err != nil {
+		var lastContent string
+		for i := len(m.messages) - 1; i >= 0; i-- {
+			if m.messages[i].role == "assistant" || m.messages[i].role == "agent" {
+				lastContent = m.messages[i].content
+				break
+			}
+		}
+		if lastContent == "" {
+			m.messages = append(m.messages, chatMessage{role: "system", content: "Nothing to copy."})
+			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
+			m.updateViewportContent()
+			return m, nil
+		}
+		if err := clipboard.WriteAll(lastContent); err != nil {
 			m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("clipboard: %v", err)})
 			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
 			m.updateViewportContent()
@@ -1011,8 +1200,13 @@ func (m *model) handleCopy(arg string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	blocks := extractCodeBlocks(lastMsg)
-	if len(blocks) == 0 {
+	var allBlocks []string
+	for _, r := range m.messages {
+		if r.role == "assistant" || r.role == "agent" {
+			allBlocks = append(allBlocks, extractCodeBlocks(r.content)...)
+		}
+	}
+	if len(allBlocks) == 0 {
 		m.messages = append(m.messages, chatMessage{role: "system", content: "No code block found."})
 		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
 		m.updateViewportContent()
@@ -1029,14 +1223,14 @@ func (m *model) handleCopy(arg string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	if idx < 0 || idx >= len(blocks) {
-		m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("Only %d code blocks.", len(blocks))})
+	if idx < 0 || idx >= len(allBlocks) {
+		m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("Only %d code blocks.", len(allBlocks))})
 		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
 		m.updateViewportContent()
 		return m, nil
 	}
 
-	if err := clipboard.WriteAll(blocks[idx]); err != nil {
+	if err := clipboard.WriteAll(allBlocks[idx]); err != nil {
 		m.messages = append(m.messages, chatMessage{role: "system", content: fmt.Sprintf("clipboard: %v", err)})
 		m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
 		m.updateViewportContent()
@@ -1060,10 +1254,10 @@ func extractCodeBlocks(s string) []string {
 	return blocks
 }
 
-func addCopyLabels(s string) string {
+func addCopyLabels(s string, startIdx int) string {
 	var result strings.Builder
 	rest := s
-	idx := 0
+	idx := startIdx
 	for {
 		loc := fenceRx.FindStringIndex(rest)
 		if loc == nil {
@@ -1154,6 +1348,9 @@ func (m *model) startStream(input string) tea.Cmd {
 		err := llm.StreamChat(
 			baseURL, apiKey, modelID, msgs,
 			func(chunk string, done bool, err error) {
+				if ctx.Err() != nil {
+					return
+				}
 				if err != nil {
 					select {
 					case sub <- errMsg{err: err}:
@@ -1236,7 +1433,16 @@ func (m *model) renderMessage(msg chatMessage) string {
 	case "assistant":
 		tok := session.EstimateTokens(msg.content)
 		header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render(fmt.Sprintf("▎ %s [%d tok]", m.activeModel, tok))
-		body := addCopyLabels(msg.content)
+		offset := 0
+		for _, r := range m.messages {
+			if r.role == "assistant" && r.content == msg.content {
+				break
+			}
+			if r.role == "assistant" {
+				offset += len(extractCodeBlocks(r.content))
+			}
+		}
+		body := addCopyLabels(msg.content, offset)
 		if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth())); err == nil {
 			if rendered, err := r.Render(body); err == nil {
 				body = rendered
@@ -1254,7 +1460,13 @@ func (m *model) renderMessage(msg chatMessage) string {
 
 func (m *model) renderStreaming() string {
 	header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render("▎ " + m.activeModel)
-	content := addCopyLabels(m.currentResp)
+	offset := 0
+	for _, r := range m.messages {
+		if r.role == "assistant" {
+			offset += len(extractCodeBlocks(r.content))
+		}
+	}
+	content := addCopyLabels(m.currentResp, offset)
 	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth()))
 	if err != nil {
 		return header + "\n" + content + "\n" + m.spinner.View()

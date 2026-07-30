@@ -13,14 +13,17 @@ import (
 const maxRetries = 2
 
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 type chatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
+	Model    string           `json:"model"`
+	Messages []Message        `json:"messages"`
+	Stream   bool             `json:"stream"`
+	Tools    []ToolDefinition `json:"tools,omitempty"`
 }
 
 type chunkChoice struct {
@@ -37,7 +40,8 @@ type chatChunk struct {
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string     `json:"content"`
+			ToolCalls []ToolCall `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`
 }
@@ -83,6 +87,49 @@ func Chat(baseURL, apiKey, model string, messages []Message) (string, error) {
 	}
 
 	return chatResp.Choices[0].Message.Content, nil
+}
+
+func ChatWithTools(baseURL, apiKey, model string, messages []Message, tools []ToolDefinition) (Message, error) {
+	body, err := json.Marshal(chatRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   false,
+		Tools:    tools,
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("marshal: %w", err)
+	}
+
+	url := strings.TrimRight(baseURL, "/") + "/chat/completions"
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return Message{}, fmt.Errorf("request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return Message{}, fmt.Errorf("http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return Message{}, fmt.Errorf("API %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var chatResp chatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return Message{}, fmt.Errorf("decode: %w", err)
+	}
+
+	if len(chatResp.Choices) == 0 {
+		return Message{}, fmt.Errorf("no choices in response")
+	}
+
+	m := chatResp.Choices[0].Message
+	return Message{Role: "assistant", Content: m.Content, ToolCalls: m.ToolCalls}, nil
 }
 
 func StreamChat(baseURL, apiKey, model string, messages []Message, cb Callback) error {

@@ -19,3 +19,9 @@ providers:
         name: "Llama 3.3 70B"
       - id: "mixtral-8x7b-32768"
         name: "Mixtral 8x7b"
+
+mcp:
+  servers:
+    filesystem:
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "."]

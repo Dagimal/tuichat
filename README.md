@@ -107,3 +107,4 @@ input/output token counts and total context tokens (`ctx`) sent per request.
 - **Rendered message cache** — glamour output cached per message, no re-render on stream updates
 - **File reader** — `/read <path> [instruction]` reads any text file into chat. With an instruction, sends file content to LLM for processing (e.g., `/read deploy.yaml add nfs server`)
 - **Clipboard code copy** — `/cp [N|all]` copies the last LLM code block (or by index, or full text) to the system clipboard
+- **MCP tool integration** — `/mcp <server> <instruction>` runs commands via MCP servers (e.g., filesystem tools, browser automation). Configured in `config.yaml` under `mcp.servers`
