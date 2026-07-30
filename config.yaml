@@ -22,6 +22,9 @@ providers:
 
 mcp:
   servers:
+    chrome:
+      command: "npx"
+      args: ["-y", "chrome-devtools-mcp@latest", "--slim", "--headless"]
     filesystem:
       command: "npx"
       args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
