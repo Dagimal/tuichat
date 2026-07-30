@@ -41,12 +41,41 @@ func NewClient(command string, args []string) (*Client, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start: %w", err)
 	}
-	return &Client{
+	c := &Client{
 		cmd:    cmd,
 		stdin:  stdin,
 		dec:    json.NewDecoder(stdout),
 		stderr: stderr,
-	}, nil
+	}
+	if err := c.handshake(); err != nil {
+		c.Close()
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *Client) handshake() error {
+	var serverResult struct {
+		ProtocolVersion string `json:"protocolVersion"`
+	}
+	if err := c.Call("initialize", map[string]interface{}{
+		"protocolVersion": "2024-11-05",
+		"capabilities":    map[string]interface{}{},
+		"clientInfo": map[string]interface{}{
+			"name":    "tuichat",
+			"version": "1.0",
+		},
+	}, &serverResult); err != nil {
+		return fmt.Errorf("initialize: %w", err)
+	}
+	// send initialized notification (no id)
+	notif, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+	notif = append(notif, '\n')
+	c.stdin.Write(notif)
+	return nil
 }
 
 func (c *Client) Close() {
