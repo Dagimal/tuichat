@@ -1055,6 +1055,25 @@ func extractCodeBlocks(s string) []string {
 	return blocks
 }
 
+func addCopyLabels(s string) string {
+	var result strings.Builder
+	rest := s
+	idx := 0
+	for {
+		loc := fenceRx.FindStringIndex(rest)
+		if loc == nil {
+			result.WriteString(rest)
+			break
+		}
+		result.WriteString(rest[:loc[0]])
+		result.WriteString(fmt.Sprintf("**[Copy %d]**\n", idx))
+		result.WriteString(rest[loc[0]:loc[1]])
+		rest = rest[loc[1]:]
+		idx++
+	}
+	return result.String()
+}
+
 func resolvePath(p string) (string, error) {
 	if strings.HasPrefix(p, "~/") {
 		home, err := os.UserHomeDir()
@@ -1212,9 +1231,9 @@ func (m *model) renderMessage(msg chatMessage) string {
 	case "assistant":
 		tok := session.EstimateTokens(msg.content)
 		header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render(fmt.Sprintf("▎ %s [%d tok]", m.activeModel, tok))
-		body := msg.content
+		body := addCopyLabels(msg.content)
 		if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth())); err == nil {
-			if rendered, err := r.Render(msg.content); err == nil {
+			if rendered, err := r.Render(body); err == nil {
 				body = rendered
 			}
 		}
@@ -1230,13 +1249,14 @@ func (m *model) renderMessage(msg chatMessage) string {
 
 func (m *model) renderStreaming() string {
 	header := lipgloss.NewStyle().Bold(true).Foreground(assistantColor).Render("▎ " + m.activeModel)
+	content := addCopyLabels(m.currentResp)
 	r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"), glamour.WithWordWrap(m.glamourWidth()))
 	if err != nil {
-		return header + "\n" + m.currentResp + "\n" + m.spinner.View()
+		return header + "\n" + content + "\n" + m.spinner.View()
 	}
-	rendered, err := r.Render(m.currentResp)
+	rendered, err := r.Render(content)
 	if err != nil {
-		return header + "\n" + m.currentResp + "\n" + m.spinner.View()
+		return header + "\n" + content + "\n" + m.spinner.View()
 	}
 	return header + "\n" + rendered + "\n" + m.spinner.View()
 }
