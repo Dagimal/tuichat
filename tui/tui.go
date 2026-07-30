@@ -47,7 +47,12 @@ func (e errMsg) Error() string { return e.err.Error() }
 
 type readResultMsg struct{ content string }
 type mcpProgressMsg string
-type mcpDoneMsg struct{ content string }
+type mcpDoneMsg struct {
+	content  string
+	inputTok int
+	outTok   int
+	ctxTok   int
+}
 
 type modelItem struct {
 	provider *config.Provider
@@ -330,6 +335,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case mcpDoneMsg:
 		m.loading = false
+		m.inputTokens += msg.inputTok
+		m.outputTokens += msg.outTok
+		m.ctxTokens = msg.ctxTok
 		if m.currentResp != "" {
 			m.messages = append(m.messages, chatMessage{role: "assistant", content: strings.TrimSpace(m.currentResp)})
 			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
@@ -1085,21 +1093,33 @@ func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
 	apiKey := m.activeProvider.APIKey
 	modelID := m.activeModel
 
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+
 	go func() {
+		defer cancel()
+
 		send := func(msg string) {
 			select {
 			case sub <- mcpProgressMsg(msg):
 			default:
 			}
 		}
+		fail := func(msg string) {
+			select {
+			case sub <- mcpDoneMsg{content: msg}:
+			default:
+			}
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
 
 		send(fmt.Sprintf("starting MCP server: %s...", serverName))
 		client, err := mcp.NewClient(entry.Command, entry.Args)
 		if err != nil {
-			select {
-			case sub <- mcpDoneMsg{content: fmt.Sprintf("MCP error: %v", err)}:
-			default:
-			}
+			fail(fmt.Sprintf("MCP error: %v", err))
 			return
 		}
 		defer client.Close()
@@ -1115,10 +1135,7 @@ func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
 				if stderr != "" {
 					stderr = "\nstderr: " + stderr
 				}
-				select {
-				case sub <- mcpDoneMsg{content: fmt.Sprintf("MCP list tools error: %v%s", err, stderr)}:
-				default:
-				}
+				fail(fmt.Sprintf("MCP list tools error: %v%s", err, stderr))
 				return
 			}
 			toolDefs = mcp.ToolsToLLM(tools)
@@ -1126,24 +1143,42 @@ func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
 			send(fmt.Sprintf("tools loaded: %d", len(tools)))
 		}
 
+		if ctx.Err() != nil {
+			return
+		}
+
 		msgs := []llm.Message{
 			{Role: "system", Content: fmt.Sprintf("You have access to MCP tools on %s. Use them to fulfill the user's request.", serverName)},
 			{Role: "user", Content: instruction},
 		}
 
+		inputTok := 0
+		for _, msg := range msgs {
+			inputTok += session.EstimateTokens(msg.Content)
+		}
+		toolJSON, _ := json.Marshal(toolDefs)
+		inputTok += len(string(toolJSON)) / 4
+		ctxTok := inputTok
+		outTok := 0
+
 		for iter := 0; iter < 8; iter++ {
 			resp, err := llm.ChatWithTools(baseURL, apiKey, modelID, msgs, toolDefs)
-			if err != nil {
-				select {
-				case sub <- mcpDoneMsg{content: fmt.Sprintf("LLM error: %v", err)}:
-				default:
-				}
+			if ctx.Err() != nil {
 				return
+			}
+			if err != nil {
+				fail(fmt.Sprintf("LLM error: %v", err))
+				return
+			}
+
+			outTok += session.EstimateTokens(resp.Content)
+			for _, tc := range resp.ToolCalls {
+				outTok += session.EstimateTokens(tc.Function.Name + tc.Function.Arguments)
 			}
 
 			if len(resp.ToolCalls) == 0 {
 				select {
-				case sub <- mcpDoneMsg{content: resp.Content}:
+				case sub <- mcpDoneMsg{content: resp.Content, inputTok: inputTok, outTok: outTok, ctxTok: ctxTok}:
 				default:
 				}
 				return
@@ -1155,6 +1190,9 @@ func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
 				json.Unmarshal([]byte(tc.Function.Arguments), &args)
 				send(fmt.Sprintf("calling %s...", tc.Function.Name))
 				result, err := client.CallTool(tc.Function.Name, args)
+				if ctx.Err() != nil {
+					return
+				}
 				if err != nil {
 					result = fmt.Sprintf("tool error: %v", err)
 				}
@@ -1162,10 +1200,7 @@ func (m *model) handleMCP(arg string) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		select {
-		case sub <- mcpDoneMsg{content: "MCP: max iterations reached"}:
-		default:
-		}
+		fail("MCP: max iterations reached")
 	}()
 
 	return m, m.waitForStream()
