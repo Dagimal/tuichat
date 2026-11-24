@@ -338,8 +338,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inputTokens += msg.inputTok
 		m.outputTokens += msg.outTok
 		m.ctxTokens = msg.ctxTok
-		if m.currentResp != "" {
-			m.messages = append(m.messages, chatMessage{role: "assistant", content: strings.TrimSpace(m.currentResp)})
+		finalResp := strings.TrimSpace(msg.content)
+		if finalResp == "" {
+			finalResp = strings.TrimSpace(m.currentResp)
+		}
+		if finalResp != "" {
+			m.messages = append(m.messages, chatMessage{role: "assistant", content: finalResp})
 			m.rendered = append(m.rendered, m.renderMessage(m.messages[len(m.messages)-1]))
 		}
 		m.currentResp = ""

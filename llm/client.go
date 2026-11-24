@@ -167,10 +167,10 @@ func StreamChat(baseURL, apiKey, model string, messages []Message, cb Callback) 
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
+		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		data := strings.TrimPrefix(line, "data: ")
+		data := strings.TrimPrefix(line, "data:")
 		if data == "[DONE]" {
 			cb("", true, nil)
 			return nil
