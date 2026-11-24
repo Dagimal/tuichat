@@ -43,10 +43,12 @@ func NewClient(command string, args []string) (*Client, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start: %w", err)
 	}
+	scan := bufio.NewScanner(stdout)
+	scan.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	c := &Client{
 		cmd:    cmd,
 		stdin:  stdin,
-		scan:   bufio.NewScanner(stdout),
+		scan:   scan,
 		stderr: stderr,
 	}
 	if err := c.handshake(); err != nil {
@@ -98,7 +100,9 @@ func (c *Client) Call(method string, params interface{}, result interface{}) err
 		"jsonrpc": "2.0",
 		"id":      id,
 		"method":  method,
-		"params":  params,
+	}
+	if params != nil {
+		req["params"] = params
 	}
 	data, _ := json.Marshal(req)
 	data = append(data, '\n')
